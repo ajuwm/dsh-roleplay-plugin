@@ -10,7 +10,10 @@ module.exports = {
     const fs = ctx.fs
     const webServer = ctx.webServer
     const PRESET_ID = (config && config.presetId) || 'deskpet'
-    const PET_DIR = 'D:\\dsh\\pet'
+    // 可配置路径根：数据 $DSH_ROLEPLAY_HOME（默认 %USERPROFILE%\.dsh），桌宠资源 $DSH_PET_DIR。
+    const os = require('node:os'), path = require('node:path')
+    const RP_HOME = process.env.DSH_ROLEPLAY_HOME || path.join(os.homedir(), '.dsh')
+    const PET_DIR = process.env.DSH_PET_DIR || path.join(RP_HOME, 'pet')
     const IMAGE = PET_DIR + '\\lihui.png'
     const SCRIPT = PET_DIR + '\\pet-window.ps1'
     const CONFIG_FILE = PET_DIR + '\\config.json'
@@ -302,7 +305,7 @@ module.exports = {
     let lastBubbleShown = ''
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/bubble', handler: async (req, res) => {
       try {
-        const target = await fs.resolve('D:\\dsh\\.roleplay\\bubble.txt')
+        const target = await fs.resolve(path.join(RP_HOME, '.roleplay', 'bubble.txt'))
         const info = await fs.stat(target)
         if (info === undefined) return json(res, 200, { text: '' })
         const text = (await fs.readText(target)).trim()

@@ -1,10 +1,10 @@
-﻿# Desktop pet window (WPF) - HTTP architecture + floating bubble strip above character
+# Desktop pet window (WPF) - HTTP architecture + floating bubble strip above character
 # Usage: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File pet-window.ps1 -Image <png> -Name <name> -Port <dsh-port> [-Config <json>]
 param(
-  [string]$Image = 'D:\dsh\pet\lihui.png',
+  [string]$Image = (Join-Path $PSScriptRoot 'lihui.png'),
   [string]$Name = '桌宠',
   [int]$Port = 3080,
-  [string]$Config = 'D:\dsh\pet\config.json'
+  [string]$Config = (Join-Path $PSScriptRoot 'config.json')
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase

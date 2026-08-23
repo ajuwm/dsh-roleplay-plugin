@@ -7,6 +7,9 @@
 // 对外：在 isolate realm 内发布 `roleplay` 服务（getState / stop），
 //       由主机侧桥接插件经 RPC 通道 /roleplay 暴露给浏览器侧边栏。
 // 本文件是自包含 ESM 模块：不导入任何裸包，只使用注入的 ctx 服务。
+// 路径可配置：DSH_ROLEPLAY_HOME（数据根，默认 %USERPROFILE%\.dsh）、DSH_PET_DIR（桌宠资源目录）。
+import os from 'node:os'
+import path from 'node:path'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -18,6 +21,10 @@ export function apply(ctx) {
     const sandboxPolicy = ctx.sandboxPolicy
     const subprocess = ctx.subprocess
     const attachments = ctx.attachments
+
+    // 可配置路径根：数据放在 $DSH_ROLEPLAY_HOME（默认 %USERPROFILE%\.dsh），桌宠资源在 $DSH_PET_DIR。
+    const RP_HOME = process.env.DSH_ROLEPLAY_HOME || path.join(os.homedir(), '.dsh')
+    const RP_PET_DIR = process.env.DSH_PET_DIR || path.join(RP_HOME, 'pet')
 
     // ── DSH 插件设置命名空间「roleplay」双通道同步 ────────────────────────
     // settings 是可选宿主服务（ctx.get 不阻塞挂载）：存在则与 DSH 右侧「插件设置」
@@ -503,7 +510,7 @@ export function apply(ctx) {
     }
 
     async function resolveFile(rel) {
-      const root = workspaceRoot()
+      const root = RP_HOME
       return root ? await fs.resolve(rel, { cwd: root }) : await fs.resolve(rel)
     }
 
@@ -877,7 +884,7 @@ export function apply(ctx) {
     async function captureDesktop() {
       const target = await resolveFile('.roleplay/desktop-look.png')
       const outPath = fs.processPath ? fs.processPath(target) : target
-      const scriptPath = 'D:\\dsh\\pet\\desktop-shot.ps1'
+      const scriptPath = path.join(RP_PET_DIR, 'desktop-shot.ps1')
       let exe = 'powershell.exe'
       try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) {}
       const argv = [exe, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Out', outPath]
@@ -885,7 +892,7 @@ export function apply(ctx) {
       if (maxW > 0) argv.push('-MaxW', String(maxW))
       const proc = subprocess.spawn({
         argv,
-        cwd: 'D:\\dsh\\pet',
+        cwd: RP_PET_DIR,
         stdio: { stdin: 'ignore', stdout: { collect: { maxBytes: 4096 } }, stderr: { collect: { maxBytes: 4096 } } },
         graceMs: 30000,
       })
