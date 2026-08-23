@@ -19,17 +19,8 @@ window.__ModuleLoader__.load({
     var BF_DEFS = [['reliability', '靠谱'], ['empathy', '感性'], ['stability', '情绪稳'], ['ambition', '上进']]
     var relTier = function (k, v) { return REL_TIER[k][v <= 33 ? 0 : v <= 66 ? 1 : 2] }
 
-    // 商城目录（与 roleplay-host.mjs 的 SHOP_ITEMS 保持一致）
-    var SHOP = [
-      { id: 'mantou', name: '馒头', price: 10 },
-      { id: 'lamian', name: '一碗拉面', price: 25 },
-      { id: 'dianxin', name: '精致点心', price: 40 },
-      { id: 'cake', name: '橡木蛋糕卷', price: 60 },
-      { id: 'med', name: '暖胃药', price: 40 },
-      { id: 'soup', name: '滋补汤', price: 55 },
-      { id: 'flower', name: '一支小花', price: 30 },
-      { id: 'pendant', name: '星穹挂坠', price: 80 },
-    ]
+    // 商店目录不再在客户端复制：价格单一数据源来自 roleplay-host 的 get-state（shop 字段），
+    // 显示与扣款始终一致（历史教训：双端各写一份价格表曾出现显示 40 扣 30 的不一致）。
     var STAT_DEFS = [['satiety', '饱食'], ['health', '健康'], ['mood', '心情'], ['hp', '生命']]
 
     var plugin = {
@@ -708,7 +699,7 @@ window.__ModuleLoader__.load({
                     shopOpen[0] ? React.createElement('div', null,
                       st && st.savingGoal ? React.createElement('div', { className: 'rp-econ-msg', style: { marginBottom: 4 } },
                         '她正在攒钱买' + st.savingGoal.name + '（' + st.savingGoal.saved + '/' + st.savingGoal.price + ' ✦）') : null,
-                      SHOP.map(function (it) {
+                      (st && st.shop ? st.shop : []).map(function (it) {
                         return React.createElement('div', { className: 'rp-shop-row', key: it.id },
                           React.createElement('span', { className: 'rp-shop-name' }, it.name),
                           React.createElement('span', { className: 'rp-shop-price' }, it.price + ' ✦'),

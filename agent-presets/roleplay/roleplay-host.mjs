@@ -1664,6 +1664,8 @@ export function apply(ctx) {
           economy: statsEnabled() ? { coins: (state.economy || DEFAULT_ECONOMY).coins || 0 } : null,
           savingGoal: state.savingGoal || null,
           inventory: (state.inventory || []).map((x) => ({ id: x.id, name: x.name, kind: x.kind, qty: x.qty })),
+          // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
+          shop: SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })),
           relation: relationEnabled() ? { ...(state.relation || DEFAULT_RELATION) } : null,
           boyfriend: relationEnabled() ? { ...(state.boyfriend || DEFAULT_BOYFRIEND) } : null,
           milestones: relationEnabled() ? (state.milestones || []) : null,
