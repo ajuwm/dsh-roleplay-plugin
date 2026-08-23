@@ -48,7 +48,7 @@ module.exports = {
             }
           }
           if (pid === PRESET_ID) out.push(agent)
-        } catch (e) { /* skip */ }
+        } catch (e) { console.error("[deskpet] skip", e) }
       }
       return out
     }
@@ -63,7 +63,7 @@ module.exports = {
           const ev = a.session.events
           const lastSeq = Array.isArray(ev) && ev.length > 0 && typeof ev[ev.length - 1].seq === 'number' ? ev[ev.length - 1].seq : 0
           if (lastSeq > bestSeq) { bestSeq = lastSeq; best = a }
-        } catch (e) { /* skip */ }
+        } catch (e) { console.error("[deskpet] skip", e) }
       }
       targetSessionId = best.id
       return targetSessionId
@@ -75,7 +75,7 @@ module.exports = {
           const agent = agents.get(targetSessionId)
           if (agent && agent.session) return ctx.sandboxPolicy.resolve({ session: agent.session })
         }
-      } catch (e) { /* fall through */ }
+      } catch (e) { console.error("[deskpet] fall through", e) }
       try { return ctx.sandboxPolicy.resolve() } catch (e) { return null }
     }
 
@@ -86,7 +86,7 @@ module.exports = {
         const cfg = JSON.parse(raw || '{}')
         Object.assign(cfg, patch)
         await fs.writeText(target, JSON.stringify(cfg), undefined, undefined, getPolicy())
-      } catch (e) { /* keep in-memory state */ }
+      } catch (e) { console.error("[deskpet] keep in-memory state", e) }
     }
 
     function armTimeout(req) {
@@ -187,7 +187,7 @@ module.exports = {
         } else if (!petEnabled && petProc) {
           stopPet()
         }
-      } catch (e) { /* config missing or unreadable: keep current state */ }
+      } catch (e) { console.error("[deskpet] config unreadable", e) }
     }
 
     async function drain() {

@@ -31,7 +31,7 @@ export function apply(ctx) {
     // 面板双向同步（角色扮演卡），不存在则退化为仅用 state.settings（侧栏仍可编辑）。
     // 迁移到面板的字段只有这 7 项；scriptStart/scriptEnd 及角色字段留在侧栏。
     const settingsSvc = ctx.get('settings')
-    const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW', 'sideTheme']
+    const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW']
     function pickMigrated(obj) {
       const out = {}
       if (!obj) return out
@@ -57,7 +57,6 @@ export function apply(ctx) {
       if (patch.statsEnabled !== undefined) out.statsEnabled = !!patch.statsEnabled
       if (patch.difficulty === 1 || patch.difficulty === 2 || patch.difficulty === 3) out.difficulty = patch.difficulty
       if (patch.relationEnabled !== undefined) out.relationEnabled = !!patch.relationEnabled
-      if (patch.sideTheme === 'dark' || patch.sideTheme === 'light') out.sideTheme = patch.sideTheme
       return out
     }
     let nsSynced = false
@@ -76,12 +75,12 @@ export function apply(ctx) {
           await settingsSvc.update('roleplay', pickMigrated(state.settings))
         }
         nsSynced = true
-      } catch (e) { /* 校验失败等：不置位，下次再试 */ }
+      } catch (e) { console.error("roleplay: settings sync failed", e) }
     }
     async function mirrorSettingsToNamespace() {
       // 侧栏改完 state.settings 后回写命名空间，让面板同步显示。
       if (!settingsSvc) return
-      try { await settingsSvc.update('roleplay', pickMigrated(state.settings)) } catch (e) { /* ignore */ }
+      try { await settingsSvc.update('roleplay', pickMigrated(state.settings)) } catch (e) { console.error("roleplay: mirror settings failed", e) }
     }
 
     // ── 多实例写安全：进程内写队列 + 读合并 + 备份恢复 ────────────────────
@@ -127,7 +126,14 @@ export function apply(ctx) {
       }
     }
 
-    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: true, difficulty: 2, relationEnabled: true, sideTheme: 'dark' }
+    // 存档 schema 版本：结构变更时 +1 并在 migrateLegacy 补迁移，防旧存档静默失效
+    const SCHEMA_VERSION = 2
+    function migrateLegacy(parsed, fromVer) {
+      // 迁移入口：每次结构变更 SCHEMA_VERSION+1，并按版本在此升级
+      // v1 → v2：无字段结构调整（仅补版本标记；后续变更在此累加）
+      return parsed
+    }
+    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: true, difficulty: 2, relationEnabled: true }
     // ── 养成系统：生命体征 + 商城经济 ────────────────────────────────────
     const DEFAULT_STATS = { satiety: 75, health: 85, mood: 70, hp: 100, since: null }
     const DEFAULT_ECONOMY = { coins: 100, lastDaily: null, earnedToday: 0, lastFeedAt: 0, lastFeedDay: null, streak: 0, lastWorkDay: null, dailyGiftDay: null }
@@ -169,7 +175,7 @@ export function apply(ctx) {
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
     function bfMean() { const b = state.boyfriend || DEFAULT_BOYFRIEND; return (b.reliability + b.empathy + b.stability + b.ambition) / 4 }
     function boyfriendFactor() { return 0.6 + 0.8 * (bfMean() / 100) }
-    let state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [] }
+    let state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -575,7 +581,13 @@ export function apply(ctx) {
           } catch (e2) { parsed = null }
         }
         if (parsed) {
-          state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], ...parsed }
+          // 版本校验 + 迁移：旧存档（缺 schema_version）按 1 处理，逐级迁到当前
+          const fromVer = Number(parsed.schema_version) || 1
+          if (fromVer < SCHEMA_VERSION) {
+            parsed = migrateLegacy(parsed, fromVer)
+            console.error('roleplay: 存档 v' + fromVer + ' → v' + SCHEMA_VERSION + ' 迁移')
+          }
+          state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], ...parsed, schema_version: SCHEMA_VERSION }
           state.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) }
           if (!Array.isArray(state.anniversaries)) state.anniversaries = []
           state.stats = { ...DEFAULT_STATS, ...(parsed.stats || {}) }
@@ -645,12 +657,12 @@ export function apply(ctx) {
               const cur = await fs.readText(target)
               await fs.writeText(target + '.bak', cur, undefined, undefined, policyFor())
             }
-          } catch (e) { /* 无文件/读失败：跳过备份 */ }
+          } catch (e) { console.error("roleplay: backup failed", e) }
           // 读合并：把其他实例已写入的追加型内容并入本内存态，防全量覆写丢增量
           try {
             const info = await fs.stat(target)
             if (info !== undefined) mergeAppendState(JSON.parse(await fs.readText(target)))
-          } catch (e) { /* 读失败：直接写本实例态 */ }
+          } catch (e) { console.error("roleplay: read-merge failed", e) }
           await fs.writeText(target, JSON.stringify(state, null, 2), undefined, undefined, policyFor())
           await persistMemory(charKey())
           syncSettingsFromNamespace()   // fire-and-forget：与 DSH 设置命名空间对齐（幂等）
@@ -1325,7 +1337,7 @@ export function apply(ctx) {
         try {
           const bt = await resolveFile('.roleplay/bubble.txt')
           await fs.writeText(bt, thought.slice(0, 120), undefined, undefined, policyFor())
-        } catch (e) { /* 桌宠未运行或写入失败，忽略 */ }
+        } catch (e) { console.error("roleplay: bubble write failed", e) }
       }
       return { silent: true, note: '角色本次静默处理了心跳。' }
     })
@@ -1834,7 +1846,6 @@ export function apply(ctx) {
         if (s.statsEnabled !== undefined) state.settings.statsEnabled = !!s.statsEnabled
         if (s.difficulty === 1 || s.difficulty === 2 || s.difficulty === 3) state.settings.difficulty = s.difficulty
         if (s.relationEnabled !== undefined) state.settings.relationEnabled = !!s.relationEnabled
-        if (s.sideTheme === 'dark' || s.sideTheme === 'light') state.settings.sideTheme = s.sideTheme
         if (state.character) {
           if (typeof s.persona === 'string' && s.persona.trim()) state.character.persona = s.persona
           if (typeof s.scene === 'string') state.character.scene = s.scene

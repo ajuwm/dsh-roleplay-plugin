@@ -19,7 +19,6 @@ const ROLEPLAY_SETTINGS_SCHEMA = z.object({
   relationEnabled: z.boolean().default(true).description('三维关系（好感/信任/心动）'),
   autoLook: z.boolean().default(false).description('心跳时自动看一眼桌面'),
   shotMaxW: z.number().step(1).min(0).max(1600).default(0).description('桌面截图最大宽度（0=自动）'),
-  sideTheme: z.string().default('dark').description('侧栏主题：dark=深色 / light=浅色'),
 })
 
 export default {
