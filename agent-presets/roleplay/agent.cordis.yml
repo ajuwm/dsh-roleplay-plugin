@@ -266,7 +266,7 @@
     roleplay: true
   config:
     - id: roleplay-host
-      name: './roleplay-host.mjs?gen=4'
+      name: './roleplay-host.mjs?gen=5'
 
 # ---- desk pet ----
 # 持久化桌宠：桌面悬浮立绘窗口，文件 IPC + 会话注入 + 回复气泡。
@@ -278,6 +278,6 @@
     deskpet: true
   config:
     - id: deskpet-host
-      name: './deskpet.js'
+      name: './deskpet.js?gen=2'
       config:
         presetId: deskpet

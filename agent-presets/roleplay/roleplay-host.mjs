@@ -24,7 +24,8 @@ export function apply(ctx) {
 
     // 路径根：数据/桌宠资源均放在 DSH 工作区内（fs sandbox = workspace-write，仅允许写工作区，
     // 不能迁到 %USERPROFILE%\.dsh 之外）。不用硬编码盘符；DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
-    const RP_ROOT_DIR = workspaceRoot() || (sandboxPolicy && sandboxPolicy.workspaceRoot) || ''
+    // 注意：此处只用 apply 顶部已就绪的 sandboxPolicy（不能调 workspaceRoot()，它依赖后面才初始化的 selfAgent）。
+    const RP_ROOT_DIR = (sandboxPolicy && sandboxPolicy.workspaceRoot) || ''
     const RP_PET_DIR = process.env.DSH_PET_DIR || path.join(RP_ROOT_DIR, 'pet')
 
     // ── DSH 插件设置命名空间「roleplay」双通道同步 ────────────────────────

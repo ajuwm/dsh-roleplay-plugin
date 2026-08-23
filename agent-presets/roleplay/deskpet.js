@@ -13,7 +13,7 @@ module.exports = {
     // 路径根：桌宠资源/嘀咕数据均在 DSH 工作区内（fs sandbox=workspace-write，仅允许写工作区）。
     // DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
     const os = require('node:os'), path = require('node:path')
-    const wr = (sandboxPolicy && sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
+    const wr = (ctx.sandboxPolicy && ctx.sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
     const PET_DIR = process.env.DSH_PET_DIR || path.join(wr, 'pet')
     const IMAGE = PET_DIR + '\\lihui.png'
     const SCRIPT = PET_DIR + '\\pet-window.ps1'
