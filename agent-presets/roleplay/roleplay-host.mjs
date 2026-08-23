@@ -22,9 +22,10 @@ export function apply(ctx) {
     const subprocess = ctx.subprocess
     const attachments = ctx.attachments
 
-    // 可配置路径根：数据放在 $DSH_ROLEPLAY_HOME（默认 %USERPROFILE%\.dsh），桌宠资源在 $DSH_PET_DIR。
-    const RP_HOME = process.env.DSH_ROLEPLAY_HOME || path.join(os.homedir(), '.dsh')
-    const RP_PET_DIR = process.env.DSH_PET_DIR || path.join(RP_HOME, 'pet')
+    // 路径根：数据/桌宠资源均放在 DSH 工作区内（fs sandbox = workspace-write，仅允许写工作区，
+    // 不能迁到 %USERPROFILE%\.dsh 之外）。不用硬编码盘符；DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
+    const RP_ROOT_DIR = workspaceRoot() || (sandboxPolicy && sandboxPolicy.workspaceRoot) || ''
+    const RP_PET_DIR = process.env.DSH_PET_DIR || path.join(RP_ROOT_DIR, 'pet')
 
     // ── DSH 插件设置命名空间「roleplay」双通道同步 ────────────────────────
     // settings 是可选宿主服务（ctx.get 不阻塞挂载）：存在则与 DSH 右侧「插件设置」
@@ -516,7 +517,7 @@ export function apply(ctx) {
     }
 
     async function resolveFile(rel) {
-      const root = RP_HOME
+      const root = workspaceRoot()
       return root ? await fs.resolve(rel, { cwd: root }) : await fs.resolve(rel)
     }
 

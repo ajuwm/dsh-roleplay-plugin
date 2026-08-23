@@ -10,10 +10,11 @@ module.exports = {
     const fs = ctx.fs
     const webServer = ctx.webServer
     const PRESET_ID = (config && config.presetId) || 'deskpet'
-    // 可配置路径根：数据 $DSH_ROLEPLAY_HOME（默认 %USERPROFILE%\.dsh），桌宠资源 $DSH_PET_DIR。
+    // 路径根：桌宠资源/嘀咕数据均在 DSH 工作区内（fs sandbox=workspace-write，仅允许写工作区）。
+    // DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
     const os = require('node:os'), path = require('node:path')
-    const RP_HOME = process.env.DSH_ROLEPLAY_HOME || path.join(os.homedir(), '.dsh')
-    const PET_DIR = process.env.DSH_PET_DIR || path.join(RP_HOME, 'pet')
+    const wr = (sandboxPolicy && sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
+    const PET_DIR = process.env.DSH_PET_DIR || path.join(wr, 'pet')
     const IMAGE = PET_DIR + '\\lihui.png'
     const SCRIPT = PET_DIR + '\\pet-window.ps1'
     const CONFIG_FILE = PET_DIR + '\\config.json'
@@ -305,7 +306,7 @@ module.exports = {
     let lastBubbleShown = ''
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/bubble', handler: async (req, res) => {
       try {
-        const target = await fs.resolve(path.join(RP_HOME, '.roleplay', 'bubble.txt'))
+        const target = await fs.resolve(path.join(wr, '.roleplay', 'bubble.txt'))
         const info = await fs.stat(target)
         if (info === undefined) return json(res, 200, { text: '' })
         const text = (await fs.readText(target)).trim()
