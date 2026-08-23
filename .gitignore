@@ -1,0 +1,23 @@
+# --- 依赖 & 产物 ---
+node_modules/
+dist/
+*.zip
+
+# --- 敏感 / 用户数据 ---
+config.json
+.roleplay/
+*.png
+流萤-角色卡.json
+
+# --- 文本 / 临时 ---
+*.log
+*.txt
+*.code-workspace
+
+# --- DSH 内部（不该进入本插件仓库）---
+watch*.log
+we.txt
+wt.txt
+win-*.txt
+简介*
+pack-deps.js
