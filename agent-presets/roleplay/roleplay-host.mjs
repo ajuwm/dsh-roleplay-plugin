@@ -7,7 +7,7 @@
 // 对外：在 isolate realm 内发布 `roleplay` 服务（getState / stop），
 //       由主机侧桥接插件经 RPC 通道 /roleplay 暴露给浏览器侧边栏。
 // 本文件是自包含 ESM 模块：不导入任何裸包，只使用注入的 ctx 服务。
-// 路径可配置：DSH_ROLEPLAY_HOME（数据根，默认 %USERPROFILE%\.dsh）、DSH_PET_DIR（桌宠资源目录）。
+// 路径可配置：数据/桌宠资源基于 DSH 工作区；DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
 import os from 'node:os'
 import path from 'node:path'
 
