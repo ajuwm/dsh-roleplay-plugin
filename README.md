@@ -23,7 +23,7 @@
 
 1. 把 `agent-presets/roleplay` 放到 `%USERPROFILE%\.dsh\.agent-presets\roleplay`
 2. 把 `roleplay-client` 放到 `%USERPROFILE%\.dsh\profiles\web\node_modules\@dsh-user\roleplay-client`，并在 `cordis.patch.yml` 追加 `roleplay-client` 行
-3. 把 `pet`（桌宠资源）放到合适位置（默认 `D:\dsh\pet`）
+3. 把 `pet`（桌宠资源）放到数据根下的 `pet` 目录（默认 `%USERPROFILE%\.dsh\pet`，可用环境变量 `DSH_PET_DIR` 覆盖）
 4. `settings.yaml` 里 `agent-presets.default: roleplay`
 5. 重启 DSH，新建会话，侧栏点「▶ 开始扮演」
 
