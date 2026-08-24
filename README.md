@@ -23,7 +23,7 @@
 
 1. 把 `agent-presets/roleplay` 放到 `%USERPROFILE%\.dsh\.agent-presets\roleplay`
 2. 把 `roleplay-client` 放到 `%USERPROFILE%\.dsh\profiles\web\node_modules\@dsh-user\roleplay-client`，并在 `cordis.patch.yml` 追加 `roleplay-client` 行
-3. 把 `pet`（桌宠资源）放到数据根下的 `pet` 目录（默认 `%USERPROFILE%\.dsh\pet`，可用环境变量 `DSH_PET_DIR` 覆盖）
+3. 把 `pet`（桌宠资源）放到你的 **DSH 工作区**下的 `pet` 目录（默认 `<DSH 工作区>\pet`，可用环境变量 `DSH_PET_DIR` 覆盖；工作区 = DSH 运行/配置的 workspace，不是 `%USERPROFILE%\.dsh`）
 4. `settings.yaml` 里 `agent-presets.default: roleplay`
 5. 重启 DSH，新建会话，侧栏点「▶ 开始扮演」
 
@@ -38,7 +38,7 @@
 ## 🖼 说明
 
 - "看桌面"用官方 DeepSeek 适配器**原生图片支持**（DSH 0.1.1+），不再需要 vision-router 等视觉插件。
-- 角色立绘/桌宠立绘请自行放入 `pet` 目录（仓库不含版权图片素材）。
+- 角色立绘/桌宠立绘请自行放入 `<DSH 工作区>\pet` 目录（仓库不含版权图片素材）。
 
 ## ⚖️ License
 

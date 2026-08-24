@@ -37,14 +37,14 @@ dsh-roleplay-plugin/
 
 ### 2. 放置桌宠资源
 
-把 `pet` 文件夹复制到：
+把 `pet` 文件夹复制到你的 **DSH 工作区** 下的 `pet` 目录：
 
 ```
-%USERPROFILE%\.dsh\pet
+<你的 DSH 工作区>\pet
 ```
 
-> 💡 路径已可配置（不再硬编码）。默认：数据根 `%USERPROFILE%\.dsh`（角色数据 `.roleplay`）、桌宠资源 `%USERPROFILE%\.dsh\pet`。
-> 如需换位置，设置环境变量 `DSH_ROLEPLAY_HOME`（数据根）或 `DSH_PET_DIR`（桌宠资源目录）即可，**无需改代码**。
+> 💡 路径已可配置（不再硬编码）。默认：数据根 = DSH 工作区（角色数据在工作区的 `.roleplay`）、桌宠资源 = DSH 工作区下 `pet`。
+> 如需换桌宠资源位置，设置环境变量 `DSH_PET_DIR`（必须是工作区内）即可，**无需改代码**。
 
 ### 3. 放置侧栏桥接
 
@@ -73,6 +73,8 @@ agent-presets:
   default: roleplay
 ```
 
+> 不设置也不影响：角色扮演仍可在预设列表里手动选择。⚠️ DSH 的预设切换只对「空白（还没发过第一句话）会话」生效，所以手动切换时请先选好预设、确认已应用，再发第一条消息。
+
 ### 5. 重启 DSH
 
 重启后刷新页面。新建会话（默认角色扮演预设），侧栏点「▶ 开始扮演」即可开始。
@@ -87,10 +89,12 @@ agent-presets:
 
 | 内容 | 位置 |
 |------|------|
-| 桌宠设置 | `%USERPROFILE%\.dsh\pet\config.json` |
-| 角色状态/设置 | `%USERPROFILE%\.dsh\.roleplay\character.json` |
-| 角色卡 | `%USERPROFILE%\.dsh\.roleplay\cards.json` |
-| 角色记忆（含未说出口的念头） | `%USERPROFILE%\.dsh\.roleplay\mem-<角色名>.json` |
-| 角色日记 | `%USERPROFILE%\.dsh\.roleplay\diary-<角色名>-<日期>.md` |
-| 桌面截图 | `%USERPROFILE%\.dsh\.roleplay\desktop-look.png` |
-| 桌宠嘀咕 | `%USERPROFILE%\.dsh\.roleplay\bubble.txt` |
+| 桌宠设置 | `<DSH 工作区>\pet\config.json` |
+| 角色状态/设置 | `<DSH 工作区>\.roleplay\character.json` |
+| 角色卡 | `<DSH 工作区>\.roleplay\cards.json` |
+| 角色记忆（含未说出口的念头） | `<DSH 工作区>\.roleplay\mem-<角色名>.json` |
+| 角色日记 | `<DSH 工作区>\.roleplay\diary-<角色名>-<日期>.md` |
+| 桌面截图 | `<DSH 工作区>\.roleplay\desktop-look.png` |
+| 桌宠嘀咕 | `<DSH 工作区>\.roleplay\bubble.txt` |
+
+> `DSH 工作区` = DSH 运行/配置的 workspace 目录（即 `sandboxPolicy.workspaceRoot`），不是 `%USERPROFILE%\.dsh`（那是 DSH 配置目录）。
