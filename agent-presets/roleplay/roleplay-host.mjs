@@ -1304,6 +1304,8 @@ export function apply(ctx) {
         const info = await fs.stat(t)
         if (info === undefined) return []
         const parsed = JSON.parse(await fs.readText(t))
+        // 兼容旧格式：单张卡对象（非数组）→ 转成单元素数组
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.name) return [parsed]
         return Array.isArray(parsed) ? parsed : []
       } catch (e) { return [] }
     }
