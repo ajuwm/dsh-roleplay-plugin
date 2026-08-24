@@ -570,6 +570,49 @@ export function apply(ctx) {
       } catch (e) { /* fresh memory */ }
       return base
     }
+
+    // 按角色隔离的「进度」：亲密度（好感/信任/心动/男友力/里程碑）、养成数值（stats/economy）、
+    // 背包、攒钱目标、纪念日、近期记录、日记日期 —— 每个角色一份 progress-<角色名>.json。
+    // 切换角色时 persist 旧的、load 新的；character.json 不再存这些字段（只留角色卡与设置）。
+    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'lastDiaryDay']
+    function stateForSave() {
+      const out = {}
+      for (const k of Object.keys(state)) if (!PROGRESS_FIELDS.includes(k)) out[k] = state[k]
+      return out
+    }
+    async function persistProgress(key) {
+      try {
+        const t = await resolveFile('.roleplay/progress-' + key + '.json')
+        const perChar = {}
+        for (const f of PROGRESS_FIELDS) perChar[f] = state[f] ?? null
+        await fs.writeText(t, JSON.stringify(perChar, null, 2), undefined, undefined, policyFor())
+      } catch (e) { console.error('roleplay: persist progress failed', e) }
+    }
+    async function loadProgress(key) {
+      const t = await resolveFile('.roleplay/progress-' + key + '.json')
+      try {
+        const info = await fs.stat(t)
+        if (info !== undefined) {
+          const p = JSON.parse(await fs.readText(t))
+          if (p && typeof p === 'object') {
+            if (p.relation && typeof p.relation === 'object') state.relation = { ...DEFAULT_RELATION, ...p.relation }
+            if (p.boyfriend && typeof p.boyfriend === 'object') state.boyfriend = { ...DEFAULT_BOYFRIEND, ...p.boyfriend }
+            if (Array.isArray(p.milestones)) state.milestones = p.milestones
+            if (p.stats && typeof p.stats === 'object') state.stats = { ...DEFAULT_STATS, ...p.stats }
+            if (p.economy && typeof p.economy === 'object') state.economy = { ...DEFAULT_ECONOMY, ...p.economy }
+            if (Array.isArray(p.inventory)) state.inventory = p.inventory
+            state.savingGoal = p.savingGoal || null
+            if (Array.isArray(p.anniversaries)) state.anniversaries = p.anniversaries
+            if (Array.isArray(p.recentActs)) state.recentActs = p.recentActs
+            if (p.lastDiaryDay !== undefined) state.lastDiaryDay = p.lastDiaryDay || null
+          }
+          return
+        }
+      } catch (e) { /* fresh */ }
+      // 首次迁移：尚无 progress 文件时，以 character.json 里现有的旧值（当前角色）为种子落盘
+      await persistProgress(key)
+    }
+
     function diaryPrefix() { return 'diary-' + charKey() + '-' }
 
     async function loadState() {
@@ -639,6 +682,7 @@ export function apply(ctx) {
           state.recentActs = Array.isArray(state.recentActs) ? state.recentActs : []
         }
         memory = await loadMemory(charKey())
+        await loadProgress(charKey())
       } catch (e) { console.error('roleplay: load failed', e) }
       stateLoaded = true
     }
@@ -669,8 +713,9 @@ export function apply(ctx) {
             const info = await fs.stat(target)
             if (info !== undefined) mergeAppendState(JSON.parse(await fs.readText(target)))
           } catch (e) { console.error("roleplay: read-merge failed", e) }
-          await fs.writeText(target, JSON.stringify(state, null, 2), undefined, undefined, policyFor())
+          await fs.writeText(target, JSON.stringify(stateForSave(), null, 2), undefined, undefined, policyFor())
           await persistMemory(charKey())
+          await persistProgress(charKey())
           syncSettingsFromNamespace()   // fire-and-forget：与 DSH 设置命名空间对齐（幂等）
         } catch (e) { console.error('roleplay: save failed', e) }
       })
@@ -986,6 +1031,7 @@ export function apply(ctx) {
       await ensureLoaded()
       const oldKey = charKey()
       await persistMemory(oldKey)
+      await persistProgress(oldKey)
       state.character = {
         name: String(args.name),
         persona: String(args.persona),
@@ -995,6 +1041,7 @@ export function apply(ctx) {
         mode: state.character && state.character.mode ? state.character.mode : 'default',
       }
       memory = await loadMemory(charKey())
+      await loadProgress(charKey())
       state.enabled = true
       state.lastHb = heartbeatKey(new Date())
       const session = currentSession()
@@ -1210,6 +1257,10 @@ export function apply(ctx) {
     registerTool('roleplay_clear_memory', '清空角色的所有记忆：短期记忆、长期记忆、用户偏好、已谈话题、事件计数（关系阶段回到陌生人）。用户要求重置记忆/忘掉过去时调用。', { type: 'object', properties: {} }, async () => {
       await ensureLoaded()
       memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [] }
+      // 关系/里程碑随记忆一起重置（与工具描述一致）；养成数值（stats/economy）保留
+      state.relation = { ...DEFAULT_RELATION }
+      state.boyfriend = { ...DEFAULT_BOYFRIEND }
+      state.milestones = []
       await saveState()
       return { ok: true, message: '记忆已清空，关系回到陌生人。' }
     })
@@ -1283,6 +1334,7 @@ export function apply(ctx) {
       await ensureLoaded()
       const oldKey = charKey()
       await persistMemory(oldKey)
+      await persistProgress(oldKey)
       state.enabled = true
       state.character = {
         name: card.name,
@@ -1293,6 +1345,7 @@ export function apply(ctx) {
         ...(card.greeting ? { greeting: card.greeting } : {}),
       }
       memory = await loadMemory(charKey())
+      await loadProgress(charKey())
       pushStage('env', '角色卡已加载：' + card.name)
       await saveState()
       return { ok: true, character: { name: card.name, scene: card.scene, status: card.status, mode: card.mode }, message: '已开演「' + card.name + '」。' }
@@ -1752,6 +1805,7 @@ export function apply(ctx) {
           if (!card) return { ok: false, message: '还没有角色：先在对话里说「开始扮演……」，或在对话里保存一张角色卡。' }
           const oldKey = charKey()
           await persistMemory(oldKey)
+          await persistProgress(oldKey)
           state.enabled = true
           state.character = {
             name: card.name,
@@ -1762,14 +1816,11 @@ export function apply(ctx) {
             ...(card.greeting ? { greeting: card.greeting } : {}),
           }
           memory = await loadMemory(charKey())
+          await loadProgress(charKey())
           pushStage('env', '角色扮演开始：' + card.name)
           addRecentAct('开始了新的扮演')
           await saveState()
-          // 注入中性旁白，让角色主动开口（不再宣告「新故事」，避免重复时误导剧情）
-          const agent = liveAgent()
-          if (agent) {
-            try { agent.send(makeUserMessage('（她见到你，轻轻笑了笑。）', 'start'), 'next-turn', true) } catch (e) {}
-          }
+          // 不再注入自动旁白：点按钮开始后不主动输出，等用户在输入框发消息再回应
           return { ok: true, already: false, name: card.name }
         } finally {
           startRunning = false
@@ -1789,6 +1840,7 @@ export function apply(ctx) {
         await ensureLoaded()
         const oldKey = charKey()
         await persistMemory(oldKey)
+        await persistProgress(oldKey)
         state.enabled = true
         state.character = {
           name: card.name,
@@ -1799,6 +1851,7 @@ export function apply(ctx) {
           ...(card.greeting ? { greeting: card.greeting } : {}),
         }
         memory = await loadMemory(charKey())
+        await loadProgress(charKey())
         pushStage('env', '角色卡已加载：' + card.name)
         await saveState()
         return { ok: true, name: card.name }
