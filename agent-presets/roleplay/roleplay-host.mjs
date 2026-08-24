@@ -1537,11 +1537,11 @@ export function apply(ctx) {
             if (c.scene) lines.push('当前场景：' + c.scene)
             const status = c.status || {}
             const keys = Object.keys(status)
-            if (keys.length) lines.push('当前状态：' + keys.map((k) => k + ': ' + status[k]).join('，'))
+            if (keys.length) lines.push('剧本状态：' + keys.map((k) => k + ': ' + status[k]).join('，'))
             lines.push('当前时段：' + period.label + ' —— ' + period.desc)
             if (statsEnabled()) {
               const st = statsStatus()
-              lines.push('当前状态：' + st.label + ' —— ' + st.desc)
+              lines.push('当前身心状态：' + st.label + ' —— ' + st.desc)
               if (state.savingGoal) lines.push('（她心里有个小目标：攒钱给你买' + state.savingGoal.name + '，已攒 ' + (state.savingGoal.saved || 0) + '/' + state.savingGoal.price + ' 金币。）')
             }
             // 纪念日/约定日：今天或明天是特别日子时记得
@@ -1600,7 +1600,7 @@ export function apply(ctx) {
             lines.push(
               '扮演规则：',
               '1. 始终以「' + c.name + '」的身份、视角和口吻回应，不要自称 AI、助手或提及系统。',
-              '2. 剧情中的普通状态变化（场景切换、心情/金钱/体力等）用 roleplay_update 记录；但「好感/信任/心动/男友力/里程碑」属于亲密度系统，不走 roleplay_update（那是普通状态键，不是亲密度），见第 8 条。',
+              '2. 场景切换、以及角色卡里记的剧本状态键（场景、状态描述等）用 roleplay_update 记录；但「饱食/健康/心情/金币/体力」这些是后台数值（由系统随时钟衰减，以及投喂/照顾/商城维护），不要用 roleplay_update 硬改——剧情里她想吃/生病/买东西时，调用 roleplay_feed / roleplay_care / roleplay_shop 让效果真实发生。「好感/信任/心动/男友力/里程碑」属亲密度系统，不走 roleplay_update，见第 8 条。',
               rule3,
               '4. 每轮对话结束时：若本轮有值得记住的事（重要事件、约定、用户的喜好、新话题），调用 roleplay_remember 记录；用户问起过去的事时，先调用 roleplay_recall 检索再回答。',
               '5. 收到【心跳】提示时处理角色内在事务：有值得分享的事就主动以角色口吻说话，无事可说就调用 roleplay_silent。',
