@@ -1185,7 +1185,7 @@ export function apply(ctx) {
       }
     })
 
-    registerTool('roleplay_recall', '检索角色的记忆与日记：按关键词搜索长期记忆、近期记忆、用户偏好和已谈话题。用户问「你还记得…」「上次…」或需要回忆过去时调用。', {
+    registerTool('roleplay_recall', '检索角色的记忆：按关键词搜索长期记忆、近期记忆、用户偏好和已谈话题（不含日记——日记是玩家读到的私人笔记，不是你的记忆）。用户问「你还记得…」「上次…」或需要回忆过去时调用。', {
       type: 'object',
       properties: { query: { type: 'string', description: '关键词，如「水族馆」「上次」' }, limit: { type: 'integer', description: '返回条数上限（可选，默认 5）' } },
       required: ['query'],
@@ -1572,6 +1572,7 @@ export function apply(ctx) {
               lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；心动需好感+信任到位才可正增；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任。关系数值是后台记录，不必每次向玩家汇报；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
             }
             if (memLines.length) lines.push('记忆（角色记得这些）：\n' + memLines.join('\n'))
+            lines.push('（日记是玩家读到的彩蛋，不是你记忆的一部分；不要引用日记内容，也不要用"日记里写过"来作答。）')
             if (Array.isArray(memory.unspoken) && memory.unspoken.length) {
               lines.push('没来得及说出口的念头（如果合适，可以在对话中自然提起，不必每轮都提，也不要说破来源）：')
               for (const u of memory.unspoken.slice(-3)) lines.push('- ' + u.text)
