@@ -188,6 +188,10 @@ export function apply(ctx) {
     let saidGreeting = false
     let lastTurnAudit = null
     let lastTurnStart = 0
+    // 工具防滥用（防打卡/防连发）：关系评估与看桌面的「同轮一次 + 最小间隔」状态
+    let lastRelationTurn = 0
+    let lastRelationCallAt = 0
+    let lastLookTurn = 0
     let memory = {
       short_term: [], long_term: [],
       user_preferences: { likes: [], dislikes: [], notes: [] },
@@ -1140,7 +1144,7 @@ export function apply(ctx) {
       return { ok: true, stored: true, shortTerm: memory.short_term.length, longTerm: memory.long_term.length, stage: STAGE_LABELS[stage] }
     })
 
-    registerTool('roleplay_relation', '评估并更新你们的关系（亲密度：好感/信任/心动，各三档；男友力；里程碑）。每轮对话结束、发生值得记住的互动（尤其关键事件、守约/失约、她难受时你在、记住她喜好等）时，对照系统提示里的当前关系与联动规则，给出这次互动的加减（按行为而非频率、事件重于日常、负向要真实、同一行为重复加成递减），并判断是否触发里程碑。', {
+    registerTool('roleplay_relation', '评估并更新你们的关系（亲密度：好感/信任/心动，各三档；男友力；里程碑）。每轮对话结束、发生值得记住的互动（尤其关键事件、守约/失约、她难受时你在、记住她喜好等）时，对照系统提示里的当前关系与联动规则，给出这次互动的加减（按行为而非频率、事件重于日常、负向要真实、同一行为重复加成递减），并判断是否触发里程碑。评估后不要向玩家汇报具体数值变化；只有关系发生重要转折（如迈向新档位、里程碑达成）时，可在台词里自然流露一点（例如"不知为何，她好像更黏你了"），其余情况安静更新即可。', {
       type: 'object',
       properties: {
         favor: { type: 'integer', description: '好感加减（-8..8）' },
@@ -1154,6 +1158,13 @@ export function apply(ctx) {
       await ensureLoaded()
       if (!state.enabled || !state.character) return { ok: false, message: '当前没有开演。' }
       if (!relationEnabled()) return { ok: true, skipped: true }
+      // 防滥用/防打卡：同轮至多评估一次；相邻两次间隔 ≥5 分钟（用户确认值）
+      const turnKey = () => lastTurnStart || Date.now()
+      const nowMs = Date.now()
+      if (lastRelationTurn === turnKey()) return { ok: false, message: '（这轮的关系已经评估过了。）' }
+      if (nowMs - lastRelationCallAt < 5 * 60 * 1000) return { ok: false, message: '（关系变化需要时间沉淀，先不急。）' }
+      lastRelationTurn = turnKey()
+      lastRelationCallAt = nowMs
       const result = applyRelation(args || {})
       await saveState()
       let msg = []
@@ -1361,7 +1372,14 @@ export function apply(ctx) {
       return { ok: true, anniversaries: state.anniversaries, message: '已记住「' + args.name + '」：' + d }
     })
 
-    registerTool('roleplay_look_desktop', '让角色主动看向用户的桌面：截取用户当前屏幕并注入对话，以角色身份观察截图、回应用户的所作所为。当剧情中角色想看看用户的世界、想知道用户在做什么、想「看」用户时调用。', { type: 'object', properties: {} }, async () => lookDesktop())
+    registerTool('roleplay_look_desktop', '让角色主动看向用户的桌面：截取用户当前屏幕并注入对话，以角色身份观察截图、回应用户的所作所为。当剧情中角色想看看用户的世界、想知道用户在做什么、想「看」用户时调用。（注意：仅当用户开启了「心跳时自动看桌面」开关时，才适合主动看；每次主动看同轮至多一次。）', { type: 'object', properties: {} }, async () => {
+      // 防滥用/隐私：仅 autoLook 开启时允许 AI 主动看桌面；同轮至多一次（用户手动按钮不受限）
+      if (!(state.settings && state.settings.autoLook)) return { ok: false, message: '（她暂时没有去看的打算。）' }
+      const turnKey = () => lastTurnStart || Date.now()
+      if (lastLookTurn === turnKey()) return { ok: false, message: '（她刚刚看过了。）' }
+      lastLookTurn = turnKey()
+      return lookDesktop()
+    })
 
     // ── 养成系统工具（仅剧情自然行为；UI 按钮是主动操作主通道） ──────────
     registerTool('roleplay_feed', '投喂角色：给她喂食，恢复饱食与心情。玩家通过侧栏背包或桌宠菜单投喂时不要重复调用；仅在剧情中自然出现喂食场景时使用。优先从背包取食物，背包空则视为她吃了一点东西。', {
@@ -1551,7 +1569,7 @@ export function apply(ctx) {
               if (state.recentActs && state.recentActs.length) {
                 lines.push('最近他做了：' + state.recentActs.slice(-4).map((a) => a.act).join('；'))
               }
-              lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；心动需好感+信任到位才可正增；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任。')
+              lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；心动需好感+信任到位才可正增；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任。关系数值是后台记录，不必每次向玩家汇报；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
             }
             if (memLines.length) lines.push('记忆（角色记得这些）：\n' + memLines.join('\n'))
             if (Array.isArray(memory.unspoken) && memory.unspoken.length) {
