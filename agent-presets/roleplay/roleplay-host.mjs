@@ -1017,7 +1017,7 @@ export function apply(ctx) {
 
     // ==================== 工具注册（11 个） ====================
 
-    registerTool('roleplay_start', '开启角色扮演：建立角色卡（名字、人设、初始场景、初始状态、可选开场问候语）并进入扮演模式，激活心跳与日记。用户要求「开始扮演/扮演一个角色」时调用。', {
+    registerTool('roleplay_start', '开启角色扮演：建立角色卡（名字、人设、初始场景、初始状态、可选开场问候语）并进入扮演模式，激活心跳与日记。用户要求「开始扮演/扮演一个角色」时调用；若用户只说「开始扮演」未指定角色，则恢复「上次扮演的角色」（当前角色或最近的角色卡），不要凭空新建角色。', {
       type: 'object',
       properties: {
         name: { type: 'string', description: '角色名字' },
@@ -1029,9 +1029,33 @@ export function apply(ctx) {
       required: ['name', 'persona'],
     }, async (args) => {
       await ensureLoaded()
-      const oldKey = charKey()
-      await persistMemory(oldKey)
-      await persistProgress(oldKey)
+      args = args || {}
+      // 未指定名字/人设 → 恢复上次扮演的角色（当前角色或最近一张角色卡），绝不凭空新建
+      if (!args.name || !args.persona) {
+        await autoSaveCurrentCard()
+        const cards = await readCards()
+        const picked = (state.character && state.character.name && state.character.persona)
+          ? state.character
+          : (cards[cards.length - 1] || null)
+        if (picked) {
+          args = {
+            ...args,
+            name: picked.name,
+            persona: picked.persona || '',
+            ...(picked.scene ? { scene: picked.scene } : {}),
+            ...(picked.greeting ? { greeting: picked.greeting } : {}),
+            ...(picked.status && typeof picked.status === 'object' ? { status: picked.status } : {}),
+          }
+          args.fromResume = args.fromResume || true
+        }
+      }
+      if (!args.name || !args.persona) return { ok: false, message: '请告诉我角色名字和人设（例如「扮演小深：一个傲娇女仆……」），或先保存一张角色卡。' }
+      {
+        const oldKey = charKey()
+        await persistMemory(oldKey)
+        await persistProgress(oldKey)
+        await autoSaveCurrentCard()
+      }
       state.character = {
         name: String(args.name),
         persona: String(args.persona),
@@ -1288,6 +1312,30 @@ export function apply(ctx) {
       await fs.writeText(t, JSON.stringify(cards, null, 2), undefined, undefined, policyFor())
     }
 
+    // 切换/新建角色前自动保存当前角色为卡：保证旧人设永远可切回，不再被覆盖丢失。
+    // 已存在同名卡则跳过（不重复）；返回已保存的卡。
+    async function autoSaveCurrentCard() {
+      if (!state.character || !state.character.name) return null
+      try {
+        const cards = await readCards()
+        const existing = cards.find((c) => c.name === state.character.name || c.id === 'card-' + charKey())
+        if (existing) return existing
+        const card = {
+          id: 'card-' + charKey(),
+          name: state.character.name,
+          persona: state.character.persona || '',
+          ...(state.character.scene ? { scene: state.character.scene } : {}),
+          ...(state.character.status && typeof state.character.status === 'object' ? { status: JSON.parse(JSON.stringify(state.character.status)) } : {}),
+          ...(state.character.mode ? { mode: state.character.mode } : {}),
+          ...(state.character.greeting ? { greeting: state.character.greeting } : {}),
+          savedAt: new Date().toISOString(),
+        }
+        cards.push(card)
+        await writeCards(cards)
+        return card
+      } catch (e) { console.error('roleplay: auto-save card failed', e); return null }
+    }
+
     registerTool('roleplay_save_card', '把当前扮演的角色保存为一张角色卡（多卡库）。之后用 roleplay_load_card 可随时切回；桌宠互动也会以该角色回应。用户说「保存角色卡/存卡」时调用。', {
       type: 'object',
       properties: {
@@ -1335,6 +1383,7 @@ export function apply(ctx) {
       const oldKey = charKey()
       await persistMemory(oldKey)
       await persistProgress(oldKey)
+      await autoSaveCurrentCard()
       state.enabled = true
       state.character = {
         name: card.name,
@@ -1806,6 +1855,7 @@ export function apply(ctx) {
           const oldKey = charKey()
           await persistMemory(oldKey)
           await persistProgress(oldKey)
+          await autoSaveCurrentCard()
           state.enabled = true
           state.character = {
             name: card.name,
@@ -1828,7 +1878,12 @@ export function apply(ctx) {
       },
       listCards: async (args) => {
         adoptAgent(args)
+        await ensureLoaded()
         const cards = await readCards()
+        // 当前角色尚未入库也展示在列表里（虚拟项，点切换时自动落库），保证侧栏永远能切回当前角色
+        if (state.character && state.character.name && !cards.some((c) => c.name === state.character.name)) {
+          cards.push({ id: 'card-' + charKey(), name: state.character.name, persona: (state.character.persona || '').slice(0, 60) })
+        }
         return { ok: true, cards: cards.map((c) => ({ id: c.id, name: c.name, persona: (c.persona || '').slice(0, 60) })) }
       },
       loadCard: async (args) => {
@@ -1836,25 +1891,29 @@ export function apply(ctx) {
         const cards = await readCards()
         const key = String((args && args.card) || '')
         const card = cards.find((c) => c.id === key) || cards.find((c) => c.name === key)
-        if (!card) return { ok: false, message: '没有找到角色卡「' + key + '」。' }
         await ensureLoaded()
+        // 列表里展示的「当前角色」若是虚拟项（未入库），以 state.character 的真实人设为准
+        const useCard = (card && card.persona && card.persona.length > 20) ? card
+          : (state.character && state.character.name && (key === state.character.name || key === 'card-' + charKey()) ? { ...state.character } : card)
+        if (!useCard) return { ok: false, message: '没有找到角色卡「' + key + '」。' }
         const oldKey = charKey()
         await persistMemory(oldKey)
         await persistProgress(oldKey)
+        await autoSaveCurrentCard()
         state.enabled = true
         state.character = {
-          name: card.name,
-          persona: card.persona || '',
-          ...(card.scene ? { scene: card.scene } : {}),
-          ...(card.status && typeof card.status === 'object' ? { status: JSON.parse(JSON.stringify(card.status)) } : {}),
-          ...(card.mode ? { mode: card.mode } : {}),
-          ...(card.greeting ? { greeting: card.greeting } : {}),
+          name: useCard.name,
+          persona: useCard.persona || '',
+          ...(useCard.scene ? { scene: useCard.scene } : {}),
+          ...(useCard.status && typeof useCard.status === 'object' ? { status: JSON.parse(JSON.stringify(useCard.status)) } : {}),
+          ...(useCard.mode ? { mode: useCard.mode } : {}),
+          ...(useCard.greeting ? { greeting: useCard.greeting } : {}),
         }
         memory = await loadMemory(charKey())
         await loadProgress(charKey())
-        pushStage('env', '角色卡已加载：' + card.name)
+        pushStage('env', '角色卡已加载：' + useCard.name)
         await saveState()
-        return { ok: true, name: card.name }
+        return { ok: true, name: useCard.name }
       },
       lookDesktop: async (args) => {
         adoptAgent(args)
