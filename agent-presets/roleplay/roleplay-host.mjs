@@ -610,7 +610,7 @@ export function apply(ctx, config) {
         await fs.writeText(t, JSON.stringify(perChar, null, 2), undefined, undefined, policyFor())
       } catch (e) { console.error('roleplay: persist progress failed', e) }
     }
-    async function loadProgress(key) {
+    async function loadProgress(key, seedLegacy) {
       const t = await resolveFile(REL_ROOT + '/progress-' + key + '.json')
       try {
         const info = await fs.stat(t)
@@ -631,7 +631,20 @@ export function apply(ctx, config) {
           return
         }
       } catch (e) { /* fresh */ }
-      // 首次迁移：尚无 progress 文件时，以 character.json 里现有的旧值（当前角色）为种子落盘
+      // 首次落盘：seedLegacy=true 时才保留当前值（loadState 里 character.json 的旧值迁移）；
+      // 切换/新建角色一律用全新默认，绝不继承上一角色的数值。
+      if (!seedLegacy) {
+        state.relation = { ...DEFAULT_RELATION }
+        state.boyfriend = { ...DEFAULT_BOYFRIEND }
+        state.milestones = []
+        state.stats = { ...DEFAULT_STATS }
+        state.economy = { ...DEFAULT_ECONOMY }
+        state.inventory = []
+        state.savingGoal = null
+        state.anniversaries = []
+        state.recentActs = []
+        state.lastDiaryDay = null
+      }
       await persistProgress(key)
     }
 
@@ -704,7 +717,7 @@ export function apply(ctx, config) {
           state.recentActs = Array.isArray(state.recentActs) ? state.recentActs : []
         }
         memory = await loadMemory(charKey())
-        await loadProgress(charKey())
+        await loadProgress(charKey(), true)
       } catch (e) { console.error('roleplay: load failed', e) }
       stateLoaded = true
     }

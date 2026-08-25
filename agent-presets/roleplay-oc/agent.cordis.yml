@@ -1,11 +1,9 @@
-# OC 原创向角色扮演预设：全空白引擎（style: oc, dataRoot: .roleplay-oc）
-# 默认关闭 亲密度/养成（state.settings 默认值由引擎按 oc 样式决定）；用户自建角色
+﻿# OC 鍘熷垱鍚戣鑹叉壆婕旈璁撅細鍏ㄧ┖鐧藉紩鎿庯紙style: oc, dataRoot: .roleplay-oc锛?# 榛樿鍏抽棴 浜插瘑搴?鍏绘垚锛坰tate.settings 榛樿鍊肩敱寮曟搸鎸?oc 鏍峰紡鍐冲畾锛夛紱鐢ㄦ埛鑷缓瑙掕壊
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     text: |-
-      沉浸式角色扮演会话：完全以系统提示中的角色人设行事，不要跳出角色。
-
+      娌夋蹈寮忚鑹叉壆婕斾細璇濓細瀹屽叏浠ョ郴缁熸彁绀轰腑鐨勮鑹蹭汉璁捐浜嬶紝涓嶈璺冲嚭瑙掕壊銆?
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
   config:
@@ -18,7 +16,7 @@
     roleplay: true
   config:
     - id: roleplay-host
-      name: './roleplay-host.mjs?gen=12'
+      name: './roleplay-host.mjs?gen=13'
       config:
         style: oc
         dataRoot: .roleplay-oc
