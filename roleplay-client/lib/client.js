@@ -495,6 +495,7 @@ window.__ModuleLoader__.load({
                 window.setTimeout(function () { econMsg[1](null) }, 2600)
                 if (sth.refresh) sth.refresh()
               })
+              .catch(function (e) { econMsg[1]('开房间失败: ' + String(e && e.message ? e.message : e)); window.setTimeout(function () { econMsg[1](null) }, 4000) })
           }
           var roomStop = function () {
             connection.rpc.call('/roleplay', 'room-stop', sessionId ? { sessionId: sessionId } : {})
@@ -504,6 +505,7 @@ window.__ModuleLoader__.load({
                 window.setTimeout(function () { econMsg[1](null) }, 2600)
                 if (sth.refresh) sth.refresh()
               })
+              .catch(function (e) { econMsg[1]('关房间失败: ' + String(e && e.message ? e.message : e)); window.setTimeout(function () { econMsg[1](null) }, 4000) })
           }
           var saveSettings = function () {
             var g = function (id) { var el = document.getElementById(id); return el ? el.value : '' }
