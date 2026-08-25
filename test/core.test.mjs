@@ -16,10 +16,10 @@ function ok(cond, name) {
   else { FAIL++; failures.push(name); console.log('  ❌ ' + name); }
 }
 
-// 一次全新引擎实例 + 独立临时数据根
-async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay') {
-  const root = mkdtempSync(join(tmpdir(), 'rp-test-'));
-  mkdirSync(join(root, dataRoot), { recursive: true });
+// 一次全新引擎实例 + 独立临时数据根（reuseRoot 传入时复用同一数据根，用于跨实例断言）
+async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reuseRoot = null) {
+  const root = reuseRoot || mkdtempSync(join(tmpdir(), 'rp-test-'));
+  if (!reuseRoot) mkdirSync(join(root, dataRoot), { recursive: true });
   if (seedChar) writeFileSync(join(root, dataRoot, 'character.json'), JSON.stringify(seedChar));
   const captured = { tools: {}, svc: null, sections: [], events: {} };
   const fake = { id: 't-session', session: null };
@@ -52,7 +52,12 @@ async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay') {
   const call = async (name, args) => tool(name).execute(args || {});
   const svc = captured.svc;
   const gs = (args) => svc.getState({ sessionId: 't-session', ...(args || {}) });
-  return { root, dataRoot, tool, call, svc, gs, captured };
+  const promptText = async () => {
+    await new Promise((r) => setTimeout(r, 400));
+    const sec = captured.sections.find((s) => s.name === 'roleplay.character');
+    return sec ? sec.text() : '';
+  };
+  return { root, dataRoot, tool, call, svc, gs, captured, promptText };
 }
 
 // ─── T1 卡库旧格式(单对象)兼容 ───────────────────────────────
@@ -165,6 +170,80 @@ console.log('\nT8 记忆隔离');
   st = await b.gs();
   ok(st.memoryView && st.memoryView.short.some((x) => String(x).includes('水族馆')), '甲记得水族馆');
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T9 纪念日提示注入 ─────────────────────────────────────
+console.log('\nT9 纪念日注入(对话提示)');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  const today = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  const r = await b.call('roleplay_anniversary', { name: '第一次见面', date: today });
+  ok(r.ok && Array.isArray(r.anniversaries) && r.anniversaries.some((a) => a.name === '第一次见面'), '纪念日已记录(今日)');
+  const text = await b.promptText();
+  ok(String(text).includes('第一次见面'), '提示词注入纪念日');
+  ok(String(text).includes('今天是特别的日子'), '「特别的日子」提示出现');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T10 时段语气注入 ─────────────────────────────────────
+console.log('\nT10 时段语气注入');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const text = String(await b.promptText());
+  const h = new Date().getHours();
+  const label = h >= 6 && h < 9 ? '清晨' : h >= 9 && h < 12 ? '上午' : h >= 12 && h < 14 ? '中午' : h >= 14 && h < 18 ? '下午' : h >= 18 && h < 20 ? '傍晚' : h >= 20 && h < 23 ? '晚上' : '深夜';
+  ok(text.includes('当前时段：' + label), '提示词按当前时段注入(' + label + ')');
+  ok(text.includes('扮演规则'), '扮演规则随提示注入');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T11 商城购买流程 ─────────────────────────────────────
+console.log('\nT11 商城购买');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r1 = await b.call('roleplay_shop', { action: 'buy', item: 'mantou' });
+  ok(r1.ok && r1.coins === 90, '买馒头: 100-10=90 金币');
+  let st = await b.gs();
+  ok(st.inventory && st.inventory.some((x) => x.id === 'mantou' && x.qty === 1), '背包出现馒头 x1');
+  const r2 = await b.call('roleplay_shop', { action: 'buy', item: 'pendant' });
+  ok(r2.ok && r2.coins === 10, '买挂坠: 90-80=10 金币');
+  const r3 = await b.call('roleplay_shop', { action: 'buy', item: 'cake' });
+  ok(r3.ok === false && String(r3.message).includes('金币不足'), '金币不足拦截(10<60)');
+  st = await b.gs();
+  ok(st.economy && st.economy.coins === 10, '最终金币 10');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T12 里程碑: 触发/门槛/防重复 ─────────────────────────
+console.log('\nT12 里程碑');
+{
+  const b1 = await boot();
+  await b1.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r1 = await b1.call('roleplay_relation', { milestone: 'm7' }); // 需要 trustTier3(当前 tier1)
+  ok(r1 && r1.milestone === null && String(r1.message).includes('差一点'), '未满足门槛(信任不够)不触发');
+  rmSync(b1.root, { recursive: true, force: true });
+
+  const b2 = await boot();
+  await b2.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r2 = await b2.call('roleplay_relation', { milestone: 'm1' }); // 要求 favorTier1, 当前30 → 触发
+  ok(r2 && r2.milestone === '第一次成功搭话', 'm1 触发(第一次成功搭话)');
+  let pf = JSON.parse(readFileSync(join(b2.root, b2.dataRoot, 'progress-甲.json'), 'utf8'));
+  ok(pf.milestones.length === 1 && pf.milestones[0] === 'm1', '进度记录 m1 一次');
+  ok(pf.relation.favor === 36, 'm1 奖励 favor +6(30→36)');
+
+  // 跨实例(同一数据根): 再触发 m1 → 已触发过, 不重复
+  const b3 = await boot('love', null, '.roleplay', b2.root);
+  await b3.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r3 = await b3.call('roleplay_relation', { milestone: 'm1' });
+  ok(r3 && r3.milestone === null && String(r3.message).includes('已触发过'), 'm1 防重复(已触发过)');
+  pf = JSON.parse(readFileSync(join(b3.root, b3.dataRoot, 'progress-甲.json'), 'utf8'));
+  ok(pf.milestones.length === 1, '里程碑仍只有 1 条');
+  rmSync(b2.root, { recursive: true, force: true });
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
