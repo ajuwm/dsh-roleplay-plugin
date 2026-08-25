@@ -1068,10 +1068,13 @@ export function apply(ctx, config) {
         const cards = await readCards()
         const curName = state.character && state.character.name
         const members = []
+        const seen = new Set()
         for (const n of names) {
-          let card = cards.find((c) => c.name === n)
+          let card = cards.find((c) => c.name === n) || cards.find((c) => c.id === n)
           if (!card && curName === n && state.character && state.character.persona) card = state.character
           if (!card) return { ok: false, message: '没有角色「' + n + '」——先「保存角色卡」，或直接用当前角色。' }
+          if (seen.has(card.name)) continue
+          seen.add(card.name)
           members.push(card)
         }
         // 当前角色(若在房内)也确保入库

@@ -18,7 +18,7 @@
     roleplay: true
   config:
     - id: roleplay-host
-      name: './roleplay-host.mjs?gen=17'
+      name: './roleplay-host.mjs?gen=18'
       config:
         style: oc
         dataRoot: .roleplay-oc

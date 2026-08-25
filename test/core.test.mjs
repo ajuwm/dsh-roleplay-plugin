@@ -382,6 +382,21 @@ console.log('\nT17 卡库全局共享');
   rmSync(b1.root, { recursive: true, force: true });
 }
 
+// ─── T18 房间按「卡 id」开启(侧栏传 id 的场景) ─────────────────
+console.log('\nT18 房间按卡 id 开启');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  await b.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  await b.call('roleplay_save_card', { name: '乙' });
+  const cards = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'cards.json'), 'utf8'));
+  const idYi = cards.find((c) => c.name === '乙').id;
+  const r = await b.call('roleplay_room', { action: 'start', characters: ['甲', idYi] });
+  ok(r.ok && r.members.includes('甲') && r.members.includes('乙'), '按卡 id 也能开房间(id=' + idYi + ')');
+  await b.call('roleplay_room', { action: 'stop' });
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

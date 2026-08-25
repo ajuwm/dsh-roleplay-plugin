@@ -485,7 +485,8 @@ window.__ModuleLoader__.load({
           var roomSel = React.useState('')
           var roomStart = function () {
             var first = st && st.character ? st.character.name : null
-            var second = roomSel[0]
+            var chosen = (cards.cards.list || []).filter(function (x) { return x.id === roomSel[0] })[0]
+            var second = chosen ? chosen.name : null
             if (!first || !second || first === second) { econMsg[1]('先选一张与当前角色不同的卡'); window.setTimeout(function () { econMsg[1](null) }, 2600); return }
             connection.rpc.call('/roleplay', 'room-start', Object.assign(sessionId ? { sessionId: sessionId } : {}, { characters: [first, second] }))
               .then(function (result) {
