@@ -100,3 +100,4 @@ agent-presets:
 | 桌宠嘀咕 | `<DSH 工作区>\.roleplay\bubble.txt` |
 
 > `DSH 工作区` = DSH 运行/配置的 workspace 目录（即 `sandboxPolicy.workspaceRoot`），不是 `%USERPROFILE%\.dsh`（那是 DSH 配置目录）。
+> 角色卡库（`cards.json`）是**全局共享**的：恋爱向/朋友向/OC 原创向的任何对话里保存的卡，其他对话都能看到并切换；角色记忆/日记/亲密度/养成按角色隔离，对话历史每会话独立。
