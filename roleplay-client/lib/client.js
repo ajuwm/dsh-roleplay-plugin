@@ -73,6 +73,7 @@ window.__ModuleLoader__.load({
           '.rp-sb-stop { margin-top:6px; padding:8px 0; border:1px solid rgba(220,100,100,.5); border-radius:8px; background:transparent; color:#e8a0a0; cursor:pointer; font-size:13px; flex:0 0 auto; }',
           '.rp-sb-stop:hover { background:rgba(220,100,100,.12); }',
           '.rp-sb-pet-btns { display:flex; gap:8px; margin-top:6px; }',
+          '.rp-sb-room-badge { flex:1 1 auto; font-size:13px; color:inherit; opacity:.92; }',
           '.rp-sb-pet-btn { flex:1; padding:6px 0; border-radius:8px; cursor:pointer; font-size:13px; }',
           '.rp-sb-pet-on { border:1px solid rgba(120,200,140,.5); background:transparent; color:#a8d8b4; }',
           '.rp-sb-pet-on:hover { background:rgba(120,200,140,.12); }',
@@ -683,10 +684,6 @@ window.__ModuleLoader__.load({
                           c ? React.createElement('div', { className: 'rp-sb-row' },
                             React.createElement('span', { className: 'rp-sb-k' }, '角色'),
                             React.createElement('span', null, c.name + (st.stageLabel ? ' · ' + st.stageLabel : ''))) : null,
-                          st && st.roomMembers && st.roomMembers.length ? React.createElement('div', { className: 'rp-sb-row' },
-                            React.createElement('span', { className: 'rp-sb-k' }, '房间'),
-                            React.createElement('span', null, '🗣 ' + st.roomMembers.join(' · ')),
-                            React.createElement('button', { className: 'rp-sb-card-switch', style: { marginLeft: 8, padding: '2px 8px' }, onClick: roomStop }, '关房间')) : null,
                           React.createElement('div', { className: 'rp-sb-pet-btns' },
                             React.createElement('button', { className: 'rp-sb-pet-btn rp-sb-pet-on', onClick: pet.start }, '启动桌宠'),
                             React.createElement('button', { className: 'rp-sb-pet-btn rp-sb-pet-off', onClick: pet.stop }, '关闭桌宠'))
@@ -721,21 +718,29 @@ window.__ModuleLoader__.load({
                   ),
                   React.createElement('div', { className: 'rp-sb-section rp-sb-cards' },
                     React.createElement('div', { className: 'rp-sb-section-title' }, '房间 (双人)'),
-                    cards.cards.loaded
+                    st && st.roomMembers && st.roomMembers.length
                       ? React.createElement('div', { className: 'rp-sb-card-row' },
-                          React.createElement('select', {
-                            className: 'rp-sb-card-select',
-                            value: roomSel[0],
-                            onChange: function (ev) { roomSel[1](ev.target.value) },
-                          }, cards.cards.list.map(function (ck) {
-                            return React.createElement('option', { key: ck.id, value: ck.id }, ck.name)
-                          })),
+                          React.createElement('span', { className: 'rp-sb-room-badge' }, '🗣 ' + st.roomMembers.join(' · ')),
                           React.createElement('button', {
                             className: 'rp-sb-card-switch',
-                            onClick: roomStart,
-                          }, '开房间')
+                            onClick: roomStop,
+                          }, '关房间')
                         )
-                      : null
+                      : (cards.cards.loaded
+                          ? React.createElement('div', { className: 'rp-sb-card-row' },
+                              React.createElement('select', {
+                                className: 'rp-sb-card-select',
+                                value: roomSel[0],
+                                onChange: function (ev) { roomSel[1](ev.target.value) },
+                              }, cards.cards.list.map(function (ck) {
+                                return React.createElement('option', { key: ck.id, value: ck.id }, ck.name)
+                              })),
+                              React.createElement('button', {
+                                className: 'rp-sb-card-switch',
+                                onClick: roomStart,
+                              }, '开房间')
+                            )
+                          : null)
                   ),
                   React.createElement('div', { className: 'rp-fold', key: 'shop' },
                     React.createElement('div', { className: 'rp-fold-head', onClick: function () { shopOpen[1](!shopOpen[0]) } },
