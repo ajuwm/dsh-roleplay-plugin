@@ -25,6 +25,22 @@ dsh-roleplay-plugin/
 
 ## 安装步骤
 
+### ★ 推荐：一键安装
+
+解压后运行（PowerShell）：
+
+```
+pwsh install.ps1            # 安装（可选 -Default 设为默认预设、-Workspace <路径> 指定 DSH 工作区）
+pwsh install.ps1 -Uninstall # 一键撤销（patch 移除/桥接删除；-Presets 一并删预设，-Pet 一并删桌宠）
+```
+
+脚本会自动：放置三个预设 → 放置桌宠资源 → 放置侧栏桥接 → **安全合并 cordis.patch.yml**（先备份 .bak，异常自动回滚）。所有改动可一键卸载。
+
+> 如果 DSH 启动异常：`pwsh install.ps1 -Uninstall` 回滚即可恢复。
+
+<details>
+<summary>手动安装（备选）：</summary>
+
 ### 1. 放置预设
 
 把 `agent-presets\roleplay`（恋爱向，含角色扮演 + 桌宠附加功能）整个文件夹复制到：
@@ -79,6 +95,7 @@ agent-presets:
 
 ### 5. 重启 DSH
 
+</details>
 重启后刷新页面。新建会话（默认角色扮演预设），侧栏点「▶ 开始扮演」即可开始。
 
 ## 使用
