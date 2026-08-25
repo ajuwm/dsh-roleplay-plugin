@@ -256,9 +256,10 @@
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
 
-# ---- roleplay ----
+# ---- roleplay (恋爱向) ----
 # 持久化角色扮演插件（原 roleplay 预设的行）：11 扮演工具、心跳、日记、记忆、
 # 关系阶段。发布 `roleplay` 服务（getState/stop）供浏览器桥接读取。
+# style: love（默认）; dataRoot 默认 .roleplay（现有数据不动）。
 - id: roleplay
   name: cordis:group
   group: true
@@ -266,7 +267,9 @@
     roleplay: true
   config:
     - id: roleplay-host
-      name: './roleplay-host.mjs?gen=11'
+      name: './roleplay-host.mjs?gen=12'
+      config:
+        style: love
 
 # ---- desk pet ----
 # 持久化桌宠：桌面悬浮立绘窗口，文件 IPC + 会话注入 + 回复气泡。
@@ -280,4 +283,4 @@
     - id: deskpet-host
       name: './deskpet.js?gen=2'
       config:
-        presetId: deskpet
+        presetId: roleplay

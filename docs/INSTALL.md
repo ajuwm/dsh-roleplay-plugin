@@ -27,13 +27,15 @@ dsh-roleplay-plugin/
 
 ### 1. 放置预设
 
-把 `agent-presets\roleplay` 整个文件夹复制到：
+把 `agent-presets\roleplay`（恋爱向，含角色扮演 + 桌宠附加功能）整个文件夹复制到：
 
 ```
 %USERPROFILE%\.dsh\.agent-presets\roleplay
 ```
 
-> 该预设同时覆盖角色扮演与桌宠：角色扮演为主体，桌宠为一键启动的附加功能。
+需要「朋友向 / OC 原创向」时，把 `agent-presets\roleplay-friend`、`agent-presets\roleplay-oc` 也复制到 `%USERPROFILE%\.dsh\.agent-presets\` 下（三个预设共用同一引擎、数据目录各自独立：`.roleplay` / `.roleplay-friend` / `.roleplay-oc`）。
+
+> 恋爱向为主体（角色扮演 + 桌宠一键启动）；朋友向为纯友谊轴（无助动/男友力，里程碑朋友向）；OC 原创向默认全空白（不预置关系/养成规则）。
 
 ### 2. 放置桌宠资源
 

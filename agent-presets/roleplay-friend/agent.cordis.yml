@@ -1,0 +1,24 @@
+# 朋友向角色扮演预设：纯友谊轴引擎（style: friend, dataRoot: .roleplay-friend）
+# 最小组合：人设 + 指令加载 + roleplay 引擎（无工程工具/无桌宠）
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: |-
+      沉浸式角色扮演会话：完全以系统提示中的角色人设行事，不要跳出角色。
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+- id: roleplay
+  name: cordis:group
+  group: true
+  isolate:
+    roleplay: true
+  config:
+    - id: roleplay-host
+      name: './roleplay-host.mjs?gen=12'
+      config:
+        style: friend
+        dataRoot: .roleplay-friend
