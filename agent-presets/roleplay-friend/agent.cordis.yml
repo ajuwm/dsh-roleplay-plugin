@@ -1,9 +1,11 @@
-﻿# 鏈嬪弸鍚戣鑹叉壆婕旈璁撅細绾弸璋婅酱寮曟搸锛坰tyle: friend, dataRoot: .roleplay-friend锛?# 鏈€灏忕粍鍚堬細浜鸿 + 鎸囦护鍔犺浇 + roleplay 寮曟搸锛堟棤宸ョ▼宸ュ叿/鏃犳瀹狅級
+# 朋友向角色扮演预设：纯友谊轴引擎（style: friend, dataRoot: .roleplay-friend）
+# 最小组合：人设 + 指令加载 + roleplay 引擎（无工程工具/无桌宠）
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     text: |-
-      娌夋蹈寮忚鑹叉壆婕斾細璇濓細瀹屽叏浠ョ郴缁熸彁绀轰腑鐨勮鑹蹭汉璁捐浜嬶紝涓嶈璺冲嚭瑙掕壊銆?
+      沉浸式角色扮演会话：完全以系统提示中的角色人设行事，不要跳出角色。
+
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
   config:

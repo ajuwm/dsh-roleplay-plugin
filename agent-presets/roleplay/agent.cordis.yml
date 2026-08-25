@@ -1,4 +1,4 @@
-﻿# The `cordis` agent preset: the standard coding agent, plus the ability to
+# The `cordis` agent preset: the standard coding agent, plus the ability to
 # read and write the runtime it is running in.
 #
 # It exists so a person can ask an agent to author another agent. Everything in
@@ -8,7 +8,7 @@
 #
 # TRUST: `cordis_mount` evaluates model-written JavaScript against the live
 # runtime, and a composition this agent writes becomes a preset other sessions
-# mount. Treat a session on this preset as shell access 鈥?the toolset's own
+# mount. Treat a session on this preset as shell access — the toolset's own
 # documentation makes the same statement.
 
 
@@ -22,7 +22,7 @@
 
       You can read and modify the harness you run on. Its composition is Cordis: every capability is a plugin row in a `cordis.yml`, and an agent preset is one such file mounted for a single session.
 
-      Two planes decide where an edit belongs. The HOST composition holds the registries and anything shared across sessions 鈥?persistence, the sandbox and approval stack, the model route, the subagent registry and its backends. An AGENT PRESET holds what one session contributes to those registries: its tools, its persona, its prompt sections. A row that publishes a service belongs in the host composition, or inside an `isolate` realm if the preset genuinely owns that service and nothing outside one agent reads it.
+      Two planes decide where an edit belongs. The HOST composition holds the registries and anything shared across sessions — persistence, the sandbox and approval stack, the model route, the subagent registry and its backends. An AGENT PRESET holds what one session contributes to those registries: its tools, its persona, its prompt sections. A row that publishes a service belongs in the host composition, or inside an `isolate` realm if the preset genuinely owns that service and nothing outside one agent reads it.
 
       Presets you author live one directory per preset under `${DSH_HOME:-$HOME/.dsh}/.agent-presets/<id>/`; the roster reports each preset's real path, so take the one you edit from there. NEVER edit or delete the shipped preset install (the `agent-presets` directory beside the deployment's own config): it belongs to the deployment, an upgrade overwrites it, and corrupting the `cordis` preset would disable this very mode. To change what a shipped preset does, copy its composition into a new preset directory and edit the copy.
 
@@ -33,11 +33,11 @@
   config:
     maxBytes: 65536
 
-# 鈹€鈹€ shell 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── shell ───────────────────────────────────────────────────────────────────
 
 # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to
 # publish `DSH_WEB_URL`/`DSH_WEB_MODE`, and a host row that injects a service is
-# the criterion for host-plane ownership 鈥?injection resolves before any session
+# the criterion for host-plane ownership — injection resolves before any session
 # exists, so there is no agent to key by. Behind a preset realm those variables
 # never reached the model's shell at all. Both shell tools consume the host
 # registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
@@ -50,7 +50,7 @@
   name: '@deepseek-ai/dsh-tool-pwsh'
   disabled: !!js process.platform !== 'win32'
 
-# 鈹€鈹€ filesystem 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── filesystem ──────────────────────────────────────────────────────────────
 
 # Both register into the host `tools` registry and provide nothing, so
 # they need no realm. The `fs` service and its policy stay in the host.
@@ -62,10 +62,10 @@
   config:
     sampleOverCapGlobResults: false
 
-# 鈹€鈹€ background jobs 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── background jobs ────────────────────────────────────────────────────────
 
 # Only the model-facing controls. The task REGISTRY stays on the host plane:
-# its producers sit outside any realm this file could put it in 鈥?`tool-bash`
+# its producers sit outside any realm this file could put it in — `tool-bash`
 # above resolves it with `ctx.get`, and an entry-local realm here is invisible
 # to every sibling row, so `run_in_background` would answer "background jobs
 # unavailable" while these controls sat in the catalog. The registry is keyed by
@@ -74,7 +74,7 @@
 - id: tool-jobs
   name: '@deepseek-ai/dsh-tool-jobs'
 
-# 鈹€鈹€ goals 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── goals ───────────────────────────────────────────────────────────────────
 
 # Only the model-facing tool. The goal SERVICE, its session driver, and the
 # `/goal` command stay on the host plane: the Gateway serves the goal domain as
@@ -85,10 +85,10 @@
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
 
-# 鈹€鈹€ plan mode 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── plan mode ───────────────────────────────────────────────────────────────
 
 # Plan state is per-agent by nature, so an entry-local realm is not a
-# workaround here 鈥?it is the correct lifetime.
+# workaround here — it is the correct lifetime.
 - id: planning
   name: cordis:group
   group: true
@@ -99,7 +99,7 @@
       name: '@deepseek-ai/dsh-plan-mode'
       config:
         section: |
-              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement 鈥?including an answer confirming something you asked 鈥?approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
 
               Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
 
@@ -111,7 +111,7 @@
 
               When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
 
-# 鈹€鈹€ compaction 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── compaction ──────────────────────────────────────────────────────────────
 
 # `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
 # share this realm rather than sit outside it.
@@ -119,7 +119,7 @@
 # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
 # plane, and the rows here resolve that one instance. It takes no configuration,
 # keys every fold by Session, and owns the context-meter projection units the
-# browser reads for every session 鈥?behind a realm those units would come and go
+# browser reads for every session — behind a realm those units would come and go
 # with whichever presets happen to be mounted. What a preset chooses is whether
 # its agent compacts at all, which is `compaction-basic` below.
 - id: compaction
@@ -142,7 +142,7 @@
         headChars: 4096
         tailChars: 1024
 
-# 鈹€鈹€ delegation and workflows 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── delegation and workflows ────────────────────────────────────────────────
 
 # The `subagents` registry and its spawn/fork backends live in the HOST
 # composition: the registry is a process singleton whose cross-session queries
@@ -150,14 +150,14 @@
 # registered once. This preset contributes the delegation TOOLS, which resolve
 # that host registry.
 #
-# `workflows` is different 鈥?nothing outside an agent reads it 鈥?so every row
+# `workflows` is different — nothing outside an agent reads it — so every row
 # that reaches it shares one entry-local realm here, and a consumer left
 # outside would resolve a host registry this preset does not populate.
 #
 # `tool-subagent-report` is host-plane for the same reason as the registry,
 # not because a preset may not want it: it registers a CONTINUABLE SETUP on
 # that singleton rather than a tool this agent calls, and the setup list is
-# not scope-aware 鈥?one copy per mounted preset means every child gets
+# not scope-aware — one copy per mounted preset means every child gets
 # `report` registered once per live session, which throws on the second.
 - id: delegation
   name: cordis:group
@@ -220,7 +220,7 @@
         subagentProvider: spawn
         maxRounds: 64
 
-# 鈹€鈹€ remaining model-facing rows 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── remaining model-facing rows ─────────────────────────────────────────────
 
 - id: tool-ask-user
   name: '@deepseek-ai/dsh-tool-ask-user'
@@ -238,7 +238,7 @@
     fetch: false
     searchTimeoutMs: 60000
 
-# 鈹€鈹€ skills 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ── skills ──────────────────────────────────────────────────────────────────
 
 # The composition-authoring skill travels with this preset rather than living
 # in the user's skill root: it documents THIS deployment's two planes, and a
@@ -256,8 +256,11 @@
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
 
-# ---- roleplay (鎭嬬埍鍚? ----
-# 鎸佷箙鍖栬鑹叉壆婕旀彃浠讹紙鍘?roleplay 棰勮鐨勮锛夛細11 鎵紨宸ュ叿銆佸績璺炽€佹棩璁般€佽蹇嗐€?# 鍏崇郴闃舵銆傚彂甯?`roleplay` 鏈嶅姟锛坓etState/stop锛変緵娴忚鍣ㄦˉ鎺ヨ鍙栥€?# style: love锛堥粯璁わ級; dataRoot 榛樿 .roleplay锛堢幇鏈夋暟鎹笉鍔級銆?- id: roleplay
+# ---- roleplay (恋爱向) ----
+# 持久化角色扮演插件（原 roleplay 预设的行）：12 扮演工具、心跳、日记、记忆、
+# 关系阶段、多角色房间。发布 `roleplay` 服务（getState/stop）供浏览器桥接读取。
+# style: love（默认）; dataRoot 默认 .roleplay（现有数据不动）。
+- id: roleplay
   name: cordis:group
   group: true
   isolate:
@@ -269,7 +272,9 @@
         style: love
 
 # ---- desk pet ----
-# 鎸佷箙鍖栨瀹狅細妗岄潰鎮诞绔嬬粯绐楀彛锛屾枃浠?IPC + 浼氳瘽娉ㄥ叆 + 鍥炲姘旀场銆?# 鍙戝竷 `deskpet` 鏈嶅姟锛坓etStatus/start/stop锛変緵娴忚鍣ㄦˉ鎺ユ帶鍒跺惎鍋溿€?- id: deskpet
+# 持久化桌宠：桌面悬浮立绘窗口，文件 IPC + 会话注入 + 回复气泡。
+# 发布 `deskpet` 服务（getStatus/start/stop）供浏览器桥接控制启停。
+- id: deskpet
   name: cordis:group
   group: true
   isolate:
