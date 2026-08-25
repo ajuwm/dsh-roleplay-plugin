@@ -364,6 +364,24 @@ console.log('\nT16 多角色房间');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T17 卡库全局(跨预设/跨对话共用) ─────────────────────────
+console.log('\nT17 卡库全局共享');
+{
+  const b1 = await boot();
+  await b1.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  await b1.call('roleplay_save_card', { name: '甲' }); // 显式存卡 → 全局库
+  const b2 = await boot('oc', null, '.roleplay-oc', b1.root);
+  let r = await b2.svc.listCards({ sessionId: 't-session' });
+  ok(r.ok && r.cards.some((c) => c.name === '甲'), 'OC 对话读到恋爱向存的卡(全局读)');
+  await b2.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  await b2.call('roleplay_save_card', { name: '乙' });
+  const b3 = await boot('friend', null, '.roleplay-friend', b1.root);
+  r = await b3.svc.listCards({ sessionId: 't-session' });
+  ok(r.ok && r.cards.some((c) => c.name === '甲') && r.cards.some((c) => c.name === '乙'), '朋友向读到 OC 存的卡(全局写)');
+  ok(r.ok && r.cards.length >= 2, '卡库不重复丢失');
+  rmSync(b1.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

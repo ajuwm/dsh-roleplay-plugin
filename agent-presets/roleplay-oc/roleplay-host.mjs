@@ -1403,12 +1403,25 @@ export function apply(ctx, config) {
       return { ok: true, message: '已结束扮演，角色卡已保留。' }
     })
 
-    // ==================== 多角色卡库（角色扮演 + 桌宠共用） ====================
+    // ==================== 全局角色卡库（跨对话/跨预设共用一份） ====================
+    // 卡库是玩家的资产,不按预设分目录: 全局一份(工作区 .roleplay/cards.json);
+    // 旧版按预设分的卡库(friend/oc 目录)在第一读时作为回退来源,写入永远落全局。
+    const CARDS_FILE = '.roleplay/cards.json'
 
     async function readCards() {
       try {
-        const t = await resolveFile(REL_ROOT + '/cards.json')
-        const info = await fs.stat(t)
+        const t = await resolveFile(CARDS_FILE)
+        let info = await fs.stat(t)
+        if (info === undefined && REL_ROOT !== '.roleplay') {
+          // 回退: 读旧版按预设目录的卡库(首次迁移),写盘时自动转全局
+          const legacy = await resolveFile(REL_ROOT + '/cards.json')
+          const li = await fs.stat(legacy)
+          if (li !== undefined) {
+            const raw = await fs.readText(legacy)
+            await fs.writeText(t, raw, undefined, undefined, policyFor())
+            info = { size: raw.length }
+          }
+        }
         if (info === undefined) return []
         const parsed = JSON.parse(await fs.readText(t))
         // 兼容旧格式：单张卡对象（非数组）→ 转成单元素数组
@@ -1417,7 +1430,7 @@ export function apply(ctx, config) {
       } catch (e) { return [] }
     }
     async function writeCards(cards) {
-      const t = await resolveFile(REL_ROOT + '/cards.json')
+      const t = await resolveFile(CARDS_FILE)
       await fs.writeText(t, JSON.stringify(cards, null, 2), undefined, undefined, policyFor())
     }
 
