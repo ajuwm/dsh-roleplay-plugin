@@ -23,14 +23,24 @@ const ROLEPLAY_SETTINGS_SCHEMA = z.object({
 
 export default {
   name: 'roleplay-client',
-  inject: ['connection', 'agents', 'agentPresets', 'settings'],
+  // 注意：不声明硬性 inject —— `connection/agents/agentPresets/settings` 在部分 DSH
+  // 版本/构建里未必存在；用 ctx.get 可选获取，缺了哪个就降级，绝不让本行挂载失败
+  // （避免整条 web profile 组合失败 → 用户 DSH 起不来）。
   apply(ctx) {
+    const connection = ctx.get('connection')
+    const agents = ctx.get('agents')
+    const agentPresets = ctx.get('agentPresets')
     // 注册 DSH「插件设置」命名空间（roleplay），供设置面板渲染；已注册则跳过。
     const settingsSvc = ctx.get('settings')
     if (settingsSvc !== undefined) {
       try { settingsSvc.register('roleplay', ROLEPLAY_SETTINGS_SCHEMA) } catch (e) { /* 已注册等：忽略 */ }
     }
-    const disposeChannel = ctx.connection.rpc.handle('/roleplay', async (endpoint, payload) => {
+    // 无 connection 服务（非 web 组合/旧版本）：静默降级，不抛错
+    if (connection === undefined || connection.rpc === undefined) {
+      ctx.effect(() => undefined, 'roleplay-client: degraded (no connection service)')
+      return
+    }
+    const disposeChannel = connection.rpc.handle('/roleplay', async (endpoint, payload) => {
       try {
         // 命名空间级设置读写：直连 DSH「插件设置」的 roleplay 命名空间（浏览器卡片用），
         // 不依赖会话/face；roleplay-host 经 settings/updated 事件同步到 state.settings。
@@ -49,9 +59,12 @@ export default {
           }
           return { ok: true, value: settingsSvc.get('roleplay') }
         }
+        if (agents === undefined || agentPresets === undefined) {
+          return { ok: false, error: { code: 'roleplay-unavailable', message: '当前环境缺少角色扮演桥接服务。' } }
+        }
         const sessionId = payload && payload.sessionId ? String(payload.sessionId) : undefined
-        const agent = sessionId !== undefined ? ctx.agents.get(sessionId) : undefined
-        const face = agent !== undefined ? ctx.agentPresets.serviceFor(agent, 'roleplay') : undefined
+        const agent = sessionId !== undefined ? agents.get(sessionId) : undefined
+        const face = agent !== undefined ? agentPresets.serviceFor(agent, 'roleplay') : undefined
         if (face === undefined) {
           return {
             ok: false,
@@ -95,7 +108,7 @@ export default {
           return { ok: !!value.ok, value }
         }
         if (endpoint === 'pet-status' || endpoint === 'pet-start' || endpoint === 'pet-stop') {
-          const pet = agent !== undefined ? ctx.agentPresets.serviceFor(agent, 'deskpet') : undefined
+          const pet = agent !== undefined ? agentPresets.serviceFor(agent, 'deskpet') : undefined
           if (pet === undefined) {
             return {
               ok: false,
