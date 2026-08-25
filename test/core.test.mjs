@@ -286,6 +286,48 @@ console.log('\nT13 关系核心纯函数');
   ok(r.milestoneMsg && r.milestoneMsg.ok === false && String(r.milestoneMsg.message).includes('已触发过'), 'm1 防重复(纯函数)');
 }
 
+// ─── T14 时段/想念/阶段纯函数 + 看桌面门卫 + 纪念日非今日 ──────
+console.log('\nT14 时段/想念/阶段边界');
+{
+  const tc = await import(new URL('../agent-presets/roleplay/lib/time-core.mjs', import.meta.url).href);
+  const rc = await import(new URL('../agent-presets/roleplay/lib/relation-core.mjs', import.meta.url).href);
+  const hours = [[23, '深夜'], [0, '深夜'], [5, '深夜'], [6, '清晨'], [8, '清晨'], [9, '上午'], [11, '上午'], [12, '中午'], [13, '中午'], [14, '下午'], [17, '下午'], [18, '傍晚'], [19, '傍晚'], [20, '晚上'], [22, '晚上']];
+  let allOk = true;
+  for (const [h, want] of hours) if (tc.periodOf(h).label !== want) { allOk = false; console.log('    边界失败 h=' + h + ' got=' + tc.periodOf(h).label); }
+  ok(allOk, '时段 15 个边界点全对');
+  ok(tc.missClassify(1) === null, '1小时不提示想念');
+  ok(String(tc.missClassify(2)).includes('2 小时'), '2小时 → 轻声惦记');
+  ok(String(tc.missClassify(47)).includes('1 天多'), '47小时 → 1天多');
+  ok(String(tc.missClassify(120)).includes('5 天'), '120小时 → 5天');
+  ok(rc.relationStageOf({ favor: 30, trust: 20, heart: 10 }, 0) === 'stranger', '阶段: 默认陌生人');
+  ok(rc.relationStageOf({ favor: 45, trust: 20, heart: 10 }, 1) === 'acquaintance', '阶段: acquaintance');
+  ok(rc.relationStageOf({ favor: 50, trust: 50, heart: 10 }, 3) === 'friend', '阶段: friend');
+  ok(rc.relationStageOf({ favor: 70, trust: 70, heart: 40 }, 5) === 'close_friend', '阶段: close_friend');
+  ok(rc.relationStageOf({ favor: 80, trust: 80, heart: 80 }, 7) === 'special', '阶段: special');
+  const ORDER = ['stranger', 'acquaintance', 'friend', 'close_friend', 'special'];
+  const REQS = { acquaintance: ['初次对话', '日常交流'], friend: ['一起活动', '分享日常', '互相帮助', '被夸奖', '一起回家'], close_friend: ['分享秘密'], special: ['约会'] };
+  ok(rc.computeStageOf({ 初次对话: 1, 日常交流: 1 }, ORDER, REQS) === 'acquaintance', '事件阶段: 切聊→普通认识');
+  ok(rc.computeStageOf({ 初次对话: 1 }, ORDER, REQS) === 'stranger', '事件阶段: 只有初次→陌生人');
+  ok(rc.computeStageOf({ 初次对话: 1, 日常交流: 1, 一起活动: 1 }, ORDER, REQS) === 'acquaintance', '事件阶段: 朋友要求 5 项过 3, 仅 1 项不到 ');
+}
+
+console.log('\nT15 看桌面门卫 + 纪念日非今日');
+{
+  const b = await boot('love', { enabled: false, character: null, settings: { autoLook: false } });
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const look = await b.call('roleplay_look_desktop', {});
+  ok(look && look.ok === false && String(look.message).includes('没有去看的打算'), 'autoLook=关 → 主动看桌面被拒');
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  const today = d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  await b.call('roleplay_anniversary', { name: '很久以前', date: '2000-01-01' });
+  await b.call('roleplay_anniversary', { name: '就是今天', date: today });
+  const text = String(await b.promptText());
+  ok(text.includes('就是今天'), '今天纪念日注入');
+  ok(!text.includes('很久以前'), '非今日纪念日不注入');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

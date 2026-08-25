@@ -22,6 +22,32 @@ export function reqCheck(m, rel, tierLabels = {}) {
   return null
 }
 
+// 关系阶段推导(纯函数)：档位 + 里程碑数 → 阶段
+export function relationStageOf(rel, milestoneCount) {
+  const r = rel || {}
+  const ft = axisTier(r.favor), tt = axisTier(r.trust), ht = axisTier(r.heart)
+  const n = milestoneCount || 0
+  if (n >= 7 && ft >= 3 && tt >= 3 && ht >= 3) return 'special'
+  if (n >= 5 && ft >= 3 && tt >= 2) return 'close_friend'
+  if (n >= 3 && ft >= 2 && tt >= 2) return 'friend'
+  if (n >= 1 && ft >= 2) return 'acquaintance'
+  return 'stranger'
+}
+
+// 事件次数 → 阶段(纯函数)：order[0] 为基础档，后续档达到 60% 要求即晋升
+export function computeStageOf(eventsCount, order, reqs) {
+  const ev = eventsCount || {}
+  let stage = (order && order[0]) || 'stranger'
+  for (const s of (order || []).slice(1)) {
+    const rq = (reqs && reqs[s]) || []
+    const have = rq.filter((k) => (ev[k] || 0) > 0).length
+    const need = Math.ceil(rq.length * 0.6)
+    if (have >= need) stage = s
+    else break
+  }
+  return stage
+}
+
 // 应用一次关系判断增量（好感/信任/心动 × 男友力缩放 + 心动锁 + 里程碑校验/反哺）
 // opts: { isFriend, milestonesDef, tierLabels, bfLabels, keyLabels }
 export function applyDelta(rel, bf, milestones, delta, opts = {}) {
