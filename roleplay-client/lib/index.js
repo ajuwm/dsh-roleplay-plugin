@@ -86,6 +86,14 @@ export default {
           const value = await face.deleteCard({ sessionId, card: payload && payload.card })
           return { ok: !!value.ok, value }
         }
+        if (endpoint === 'room-start') {
+          const value = await face.roomStart({ sessionId, characters: payload && payload.characters })
+          return { ok: !!value.ok, value }
+        }
+        if (endpoint === 'room-stop') {
+          const value = await face.roomStop({ sessionId })
+          return { ok: !!value.ok, value }
+        }
         if (endpoint === 'pet-status' || endpoint === 'pet-start' || endpoint === 'pet-stop') {
           const pet = agent !== undefined ? ctx.agentPresets.serviceFor(agent, 'deskpet') : undefined
           if (pet === undefined) {

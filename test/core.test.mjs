@@ -328,6 +328,42 @@ console.log('\nT15 看桌面门卫 + 纪念日非今日');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T16 多角色房间 ─────────────────────────────────────────
+console.log('\nT16 多角色房间');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲', greeting: '甲你好' });
+  await b.call('roleplay_start', { name: '乙', persona: 'p乙', greeting: '乙你好' });
+  await b.call('roleplay_save_card', { name: '乙' }); // 把当前(乙)存卡, 甲已被自动存卡
+  const r = await b.call('roleplay_room', { action: 'start', characters: ['甲', '乙'] });
+  ok(r.ok && Array.isArray(r.members) && r.members.includes('甲') && r.members.includes('乙'), '开房间: 甲+乙');
+  let st = await b.gs();
+  ok(Array.isArray(st.roomMembers) && st.roomMembers.length === 2, 'getState 返回 roomMembers');
+
+  await b.call('roleplay_remember', { event: '一起去了水族馆', kind: '一起活动', char: '乙' });
+  const mJia = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'mem-甲.json'), 'utf8'));
+  const mYi = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'mem-乙.json'), 'utf8'));
+  ok(!mJia.short_term.some((x) => String(x.event).includes('水族馆')), '甲的回忆没有水族馆');
+  ok(mYi.short_term.some((x) => String(x.event).includes('水族馆')), '乙记住了水族馆');
+
+  await b.call('roleplay_relation', { favor: 5, char: '乙' });
+  const pJia = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'progress-甲.json'), 'utf8'));
+  const pYi = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'progress-乙.json'), 'utf8'));
+  ok(pJia.relation.favor === 30, '甲 favor 仍是 30(不串)');
+  ok(pYi.relation.favor === 35, '乙 favor +5 → 35');
+
+  const text = String(await b.promptText());
+  ok(text.includes('【角色：甲】') && text.includes('【角色：乙】'), '提示注入双角色隔离块');
+  ok(text.includes('【房间规则】'), '房间规则注入');
+
+  await b.call('roleplay_room', { action: 'stop' });
+  st = await b.gs();
+  ok(!st.roomMembers || st.roomMembers.length === 0, '关房间后 roomMembers 清空');
+  const text2 = String(await b.promptText());
+  ok(!text2.includes('【房间规则】'), '退出房间后提示回到单角色');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

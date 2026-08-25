@@ -195,7 +195,7 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    let state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], schema_version: SCHEMA_VERSION }
+    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -473,10 +473,69 @@ export function apply(ctx, config) {
     }
 
     // ── 角色隔离：记忆/日记/世界书全部按角色名分文件 ──────────────────────
-    function charKey() {
-      const name = state.character && state.character.name ? String(state.character.name) : ''
-      if (!name) return '_default'
-      return name.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').slice(0, 40) || '_default'
+    function charKeyFor(name) {
+      const n = String(name || '').trim()
+      if (!n) return '_default'
+      return n.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').slice(0, 40) || '_default'
+    }
+    function charKey() { return charKeyFor(state.character ? state.character.name : '') }
+    // 房间模式：把目标角色的记忆/进度临时载入并执行 fn，之后恢复现场
+    // （成员须已是角色卡或当前角色；只替换内存态，不动持久化的主档）
+    async function withChar(name, fn) {
+      const target = String(name || '').trim()
+      if (!target) return null
+      if (!state.character || state.character.name === target) return fn()
+      const prev = state.character
+      const curKey = charKeyFor(prev.name)
+      await persistMemory(curKey)
+      await persistProgress(curKey)
+      const cards = await readCards()
+      const member = cards.find((c) => c.name === target) || (prev.name === target ? prev : null)
+      if (!member) return null
+      state.character = { ...member, mode: prev.mode || 'default' }
+      memory = await loadMemory(charKey())
+      await loadProgress(charKey())
+      try {
+        return await fn()
+      } finally {
+        const doneKey = charKey()
+        await persistMemory(doneKey)
+        await persistProgress(doneKey)
+        state.character = prev
+        memory = await loadMemory(charKey())
+        await loadProgress(charKey())
+      }
+    }
+    // 快照：房间模式下供提示注入每角色的 人设/关系/记忆摘要（不阻塞提示生成）
+    let roomSnapshot = {}
+    async function exitRoomIfAny() {
+      if (!Array.isArray(state.roomMembers) || !state.roomMembers.length) return
+      state.roomMembers = []
+      roomSnapshot = {}
+    }
+    async function refreshRoomSnapshot() {
+      const names = Array.isArray(state.roomMembers) ? state.roomMembers : []
+      const snap = {}
+      if (names.length) {
+        const cards = await readCards()
+        for (const n of names) {
+          const card = cards.find((c) => c.name === n) || (state.character && state.character.name === n ? state.character : null)
+          if (!card) continue
+          let relation = null, stage = null, milestones = [], mems = []
+          try {
+            const p = JSON.parse(await fs.readText(await resolveFile(REL_ROOT + '/progress-' + charKeyFor(n) + '.json')))
+            relation = p.relation || null
+            milestones = Array.isArray(p.milestones) ? p.milestones : []
+            stage = relation ? relationStageOf(relation, milestones.length) : null
+          } catch (e) { /* fresh */ }
+          try {
+            const m = JSON.parse(await fs.readText(await resolveFile(REL_ROOT + '/mem-' + charKeyFor(n) + '.json')))
+            mems = (Array.isArray(m.short_term) ? m.short_term : []).slice(0, 2).map((x) => String(x.event || '').slice(0, 60))
+          } catch (e) { /* fresh */ }
+          snap[n] = { name: n, persona: card.persona || '', relation, stage, mems }
+        }
+      }
+      roomSnapshot = snap
     }
     function perCharMemoryShape(worldbook) {
       return {
@@ -598,6 +657,7 @@ export function apply(ctx, config) {
           state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], ...parsed, schema_version: SCHEMA_VERSION }
           state.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) }
           if (!Array.isArray(state.anniversaries)) state.anniversaries = []
+          if (!Array.isArray(state.roomMembers)) state.roomMembers = []
           state.stats = { ...DEFAULT_STATS, ...(parsed.stats || {}) }
           state.economy = { ...DEFAULT_ECONOMY, ...(parsed.economy || {}) }
           state.inventory = Array.isArray(parsed.inventory) ? parsed.inventory : []
@@ -642,6 +702,7 @@ export function apply(ctx, config) {
         }
         memory = await loadMemory(charKey())
         await loadProgress(charKey(), true)
+        if (Array.isArray(state.roomMembers) && state.roomMembers.length) await refreshRoomSnapshot()
       } catch (e) { console.error('roleplay: load failed', e) }
       stateLoaded = true
     }
@@ -958,7 +1019,9 @@ export function apply(ctx, config) {
     // 静态工具注册：与 `harness.defineTool` 相同的 DSL 形状，直接交给 tools 注册表。
     // 注意：静态 register() 只接受具体类型的输出 schema（不接受 'json'）；本插件的
     // 全部工具都返回 JSON 对象，因此统一声明 { type: 'object' }。
+    const toolExec = {}
     function registerTool(name, description, parameters, execute) {
+      toolExec[name] = execute
       try {
         ctx.tools.register({
           name, description, parameters,
@@ -973,7 +1036,72 @@ export function apply(ctx, config) {
       }
     }
 
-    // ==================== 工具注册（11 个） ====================
+    // ==================== 工具注册（12 个） ====================
+
+    registerTool('roleplay_room', '管理「多角色房间」：把 2~3 个角色放进同一对话同台互动（各自独立的记忆/亲密度/养成）。用户说「让 A 和 B 一起陪我」「开房间」时调用；参数 characters 用角色名（须是保存过的角色卡或当前角色）。', {
+      type: 'object',
+      properties: {
+        action: { type: 'string', description: 'start 开房间 / stop 关房间 / list 查看成员' },
+        characters: { type: 'array', items: { type: 'string' }, description: 'start 时的角色名（2~3 个）' },
+      },
+      required: ['action'],
+    }, async (args) => {
+      await ensureLoaded()
+      const action = String((args && args.action) || '')
+      if (action === 'list') {
+        const names = Array.isArray(state.roomMembers) ? state.roomMembers : []
+        return { ok: true, members: names, message: names.length ? '当前房间：' + names.join('、') : '当前不是房间模式。' }
+      }
+      if (action === 'stop') {
+        if (!Array.isArray(state.roomMembers) || !state.roomMembers.length) return { ok: true, members: [], message: '本来就不是房间模式。' }
+        const curName = state.character && state.character.name
+        await persistMemory(charKey())
+        await persistProgress(charKey())
+        state.roomMembers = []
+        roomSnapshot = {}
+        await saveState()
+        return { ok: true, members: [], message: '已关闭房间' + (curName ? '，回到单角色「' + curName + '」。' : '。') }
+      }
+      if (action === 'start') {
+        const names = [...new Set((Array.isArray(args && args.characters) ? args.characters : []).map((s) => String(s).trim()).filter(Boolean))]
+        if (names.length < 2 || names.length > 3) return { ok: false, message: '开房间需要 2~3 个角色名（如「让流萤和DeepSeek一起陪我」）。' }
+        const cards = await readCards()
+        const curName = state.character && state.character.name
+        const members = []
+        for (const n of names) {
+          let card = cards.find((c) => c.name === n)
+          if (!card && curName === n && state.character && state.character.persona) card = state.character
+          if (!card) return { ok: false, message: '没有角色「' + n + '」——先「保存角色卡」，或直接用当前角色。' }
+          members.push(card)
+        }
+        // 当前角色(若在房内)也确保入库
+        await autoSaveCurrentCard()
+        // 主体：当前角色在房内则保持；否则切到第一位成员
+        if (!members.some((m) => m.name === curName)) {
+          const oldKey = charKey()
+          await persistMemory(oldKey)
+          await persistProgress(oldKey)
+          state.character = {
+            name: members[0].name,
+            persona: members[0].persona || '',
+            ...(members[0].scene ? { scene: members[0].scene } : {}),
+            ...(members[0].status && typeof members[0].status === 'object' ? { status: JSON.parse(JSON.stringify(members[0].status)) } : {}),
+            ...(members[0].greeting ? { greeting: members[0].greeting } : {}),
+            mode: state.character && state.character.mode ? state.character.mode : 'default',
+          }
+          memory = await loadMemory(charKey())
+          await loadProgress(charKey())
+        }
+        state.roomMembers = members.map((m) => m.name)
+        // 为每个成员初始化记忆/进度文件（缺则建；绝不继承他人数据）
+        await withChar(state.character.name, async () => {})
+        for (const m of members) if (m.name !== state.character.name) await withChar(m.name, async () => {})
+        await refreshRoomSnapshot()
+        await saveState()
+        return { ok: true, members: state.roomMembers.slice(), message: '房间已开启：' + state.roomMembers.join('、') + '。你们同台互动，各有各的记忆与关系。' }
+      }
+      return { ok: false, message: 'action 必须为 start / stop / list。' }
+    })
 
     registerTool('roleplay_start', '开启角色扮演：建立角色卡（名字、人设、初始场景、初始状态、可选开场问候语）并进入扮演模式，激活心跳与日记。用户要求「开始扮演/扮演一个角色」时调用；若用户只说「开始扮演」未指定角色，则恢复「上次扮演的角色」（当前角色或最近的角色卡），不要凭空新建角色。', {
       type: 'object',
@@ -987,6 +1115,7 @@ export function apply(ctx, config) {
       required: ['name', 'persona'],
     }, async (args) => {
       await ensureLoaded()
+      await exitRoomIfAny()
       args = args || {}
       // 未指定名字/人设 → 恢复上次扮演的角色（当前角色或最近一张角色卡），绝不凭空新建
       if (!args.name || !args.persona) {
@@ -1133,19 +1262,7 @@ export function apply(ctx, config) {
       return { ok: true, message: '已导入角色「' + name + '」' + (state.character.greeting ? '，开场白：「' + state.character.greeting.slice(0, 60) + '」' : '') + '。' }
     })
 
-    registerTool('roleplay_remember', '记录本轮值得记住的事：重要事件、关系事件、用户的偏好、新话题。每轮对话结束时，如果本轮的互动值得记住，调用本工具。事件类型可选：' + EVENT_KINDS.join('/') + '。', {
-      type: 'object',
-      properties: {
-        event: { type: 'string', description: '事件描述，如「一起去了水族馆」「他说他喜欢水族馆」' },
-        kind: { type: 'string', description: '事件类型（可选，默认日常交流）：' + EVENT_KINDS.join('/') },
-        emotion: { type: 'string', description: '角色的情绪反应（可选），如「害羞但开心」' },
-        importance: { type: 'string', description: '重要性（可选，high/mid/low，默认 mid）' },
-        topic: { type: 'string', description: '本轮谈到的新话题（可选），如「滑冰」' },
-        preference: { type: 'string', description: '用户表达的偏好（可选）：like=用户喜欢某事 / dislike=用户不喜欢某事；此时 event 应描述该事物' },
-      },
-      required: ['event'],
-    }, async (args) => {
-      await ensureLoaded()
+    async function rememberImpl(args) {
       const ev = String(args.event).trim()
       if (!ev) return { ok: false, message: 'event 不能为空。' }
       const now = stamp()
@@ -1169,22 +1286,32 @@ export function apply(ctx, config) {
         if (memory.long_term.length > 30) memory.long_term.length = 30
       }
       await saveState()
+      const cur = state.character && state.character.name
+      if (cur && roomSnapshot[cur]) roomSnapshot[cur].mems = memory.short_term.slice(0, 2).map((x) => String(x.event).slice(0, 60))
       const stage = computeStage()
       return { ok: true, stored: true, shortTerm: memory.short_term.length, longTerm: memory.long_term.length, stage: STAGE_LABELS[stage] }
-    })
+    }
 
-    registerTool('roleplay_relation', '评估并更新你们的关系（亲密度：好感/信任/心动，各三档；男友力；里程碑）。每轮对话结束、发生值得记住的互动（尤其关键事件、守约/失约、她难受时你在、记住她喜好等）时，对照系统提示里的当前关系与联动规则，给出这次互动的加减（按行为而非频率、事件重于日常、负向要真实、同一行为重复加成递减），并判断是否触发里程碑。评估后不要向玩家汇报具体数值变化；只有关系发生重要转折（如迈向新档位、里程碑达成）时，可在台词里自然流露一点（例如"不知为何，她好像更黏你了"），其余情况安静更新即可。', {
+    registerTool('roleplay_remember', '记录本轮值得记住的事：重要事件、关系事件、用户的偏好、新话题。每轮对话结束时，如果本轮的互动值得记住，调用本工具。事件类型可选：' + EVENT_KINDS.join('/') + '（房间模式请用 char 指定针对哪个角色）。', {
       type: 'object',
       properties: {
-        favor: { type: 'integer', description: '好感加减（-8..8）' },
-        trust: { type: 'integer', description: '信任加减（-8..8），食言/关键时刻不在掉得狠' },
-        heart: { type: 'integer', description: '心动加减（-8..8），需好感+信任到位才可正增' },
-        boyfriend: { type: 'object', properties: { reliability: { type: 'integer', description: '靠谱 -8..8' }, empathy: { type: 'integer', description: '感性 -8..8' }, stability: { type: 'integer', description: '情绪稳 -8..8' }, ambition: { type: 'integer', description: '上进 -8..8' } } },
-        milestone: { type: 'string', description: '触发里程碑 id（m1..m8），仅当某关键时刻真实发生时' },
-        note: { type: 'string', description: '一句话理由（会进演出区）' },
+        event: { type: 'string', description: '事件描述，如「一起去了水族馆」「他说他喜欢水族馆」' },
+        kind: { type: 'string', description: '事件类型（可选，默认日常交流）：' + EVENT_KINDS.join('/') },
+        emotion: { type: 'string', description: '角色的情绪反应（可选），如「害羞但开心」' },
+        importance: { type: 'string', description: '重要性（可选，high/mid/low，默认 mid）' },
+        topic: { type: 'string', description: '本轮谈到的新话题（可选），如「滑冰」' },
+        preference: { type: 'string', description: '用户表达的偏好（可选）：like=用户喜欢某事 / dislike=用户不喜欢某事；此时 event 应描述该事物' },
+        char: { type: 'string', description: '房间模式必填：针对哪个角色（角色名）；单角色可省略' },
       },
+      required: ['event'],
     }, async (args) => {
       await ensureLoaded()
+      const tgtChar = args && args.char ? String(args.char).trim() : ''
+      if (tgtChar && state.character && state.character.name !== tgtChar) return await withChar(tgtChar, () => rememberImpl(args))
+      return rememberImpl(args)
+    })
+
+    async function relationImpl(args) {
       if (!state.enabled || !state.character) return { ok: false, message: '当前没有开演。' }
       if (!relationEnabled()) return { ok: true, skipped: true }
       // 防滥用/防打卡：同轮至多评估一次；相邻两次间隔 ≥5 分钟（用户确认值）
@@ -1202,6 +1329,8 @@ export function apply(ctx, config) {
       if (args && args.note) pushStage('action', String(args.note).slice(0, 120))
       const stageLabel = STAGE_LABELS[result.stage] || STAGE_LABELS.stranger
       pushStage('env', '关系：' + stageLabel)
+      const cur = state.character && state.character.name
+      if (cur && roomSnapshot[cur]) roomSnapshot[cur].relation = { ...(state.relation || DEFAULT_RELATION) }
       return {
         ok: true,
         changed: result.changed,
@@ -1212,6 +1341,25 @@ export function apply(ctx, config) {
         milestones: state.milestones || [],
         message: msg.join(' ') || '关系已评估。',
       }
+    }
+
+    registerTool('roleplay_relation', '评估并更新你们的关系（亲密度：好感/信任/心动，各三档；男友力；里程碑）。每轮对话结束、发生值得记住的互动（尤其关键事件、守约/失约、她难受时你在、记住她喜好等）时，对照系统提示里的当前关系与联动规则，给出这次互动的加减（按行为而非频率、事件重于日常、负向要真实、同一行为重复加成递减），并判断是否触发里程碑。评估后不要向玩家汇报具体数值变化；只有关系发生重要转折（如迈向新档位、里程碑达成）时，可在台词里自然流露一点（例如"不知为何，她好像更黏你了"），其余情况安静更新即可。房间模式请用 char 指定评估哪个角色。', {
+      type: 'object',
+      properties: {
+        favor: { type: 'integer', description: '好感加减（-8..8）' },
+        trust: { type: 'integer', description: '信任加减（-8..8），食言/关键时刻不在掉得狠' },
+        heart: { type: 'integer', description: '心动加减（-8..8），需好感+信任到位才可正增' },
+        boyfriend: { type: 'object', properties: { reliability: { type: 'integer', description: '靠谱 -8..8' }, empathy: { type: 'integer', description: '感性 -8..8' }, stability: { type: 'integer', description: '情绪稳 -8..8' }, ambition: { type: 'integer', description: '上进 -8..8' } } },
+        milestone: { type: 'string', description: '触发里程碑 id（m1..m8），仅当某关键时刻真实发生时' },
+        note: { type: 'string', description: '一句话理由（会进演出区）' },
+        char: { type: 'string', description: '房间模式必填：评估哪个角色（角色名）；单角色可省略' },
+      },
+    }, async (args) => {
+      await ensureLoaded()
+      if (!state.enabled || !state.character) return { ok: false, message: '当前没有开演。' }
+      const tgtChar = args && args.char ? String(args.char).trim() : ''
+      if (tgtChar && state.character.name !== tgtChar) return await withChar(tgtChar, () => relationImpl(args))
+      return relationImpl(args)
     })
 
     registerTool('roleplay_recall', '检索角色的记忆：按关键词搜索长期记忆、近期记忆、用户偏好和已谈话题（不含日记——日记是玩家读到的私人笔记，不是你的记忆）。用户问「你还记得…」「上次…」或需要回忆过去时调用。', {
@@ -1247,8 +1395,9 @@ export function apply(ctx, config) {
       return { ok: true, message: '记忆已清空，关系回到陌生人。' }
     })
 
-    registerTool('roleplay_stop', '结束当前角色扮演：退出扮演模式，停用心跳与日记。用户说「结束扮演/不演了」时调用。', { type: 'object', properties: {} }, async () => {
+    registerTool('roleplay_stop', '结束当前角色扮演：退出扮演模式，停用心跳与日记（房间模式也一并退出）。用户说「结束扮演/不演了」时调用。', { type: 'object', properties: {} }, async () => {
       await ensureLoaded()
+      await exitRoomIfAny()
       state.enabled = false
       await saveState()
       return { ok: true, message: '已结束扮演，角色卡已保留。' }
@@ -1340,6 +1489,7 @@ export function apply(ctx, config) {
       const card = cards.find((c) => c.id === key) || cards.find((c) => c.name === key)
       if (!card) return { ok: false, message: '没有找到角色卡「' + key + '」，可用 roleplay_list_cards 查看。' }
       await ensureLoaded()
+      await exitRoomIfAny()
       const oldKey = charKey()
       await persistMemory(oldKey)
       await persistProgress(oldKey)
@@ -1378,21 +1528,26 @@ export function apply(ctx, config) {
     })
 
 
-    registerTool('roleplay_diary', '以角色第一人称写一篇当天的日记并保存到日记本（按日期一个文件）。心跳指示写日记时使用。', {
+    registerTool('roleplay_diary', '以角色第一人称写一篇当天的日记并保存到日记本（按日期一个文件）。心跳指示写日记时使用。房间模式请用 char 指定写谁。', {
       type: 'object',
-      properties: { content: { type: 'string', description: '日记正文（Markdown 格式）' } },
+      properties: { content: { type: 'string', description: '日记正文（Markdown 格式）' }, char: { type: 'string', description: '房间模式必填：写哪个角色的日记（角色名）；单角色可省略' } },
       required: ['content'],
     }, async (args) => {
       await ensureLoaded()
-      const key = dayKey(new Date())
-      const target = await resolveFile(REL_ROOT + '/' + diaryPrefix() + key + '.md')
-      let existing = ''
-      try { const info = await fs.stat(target); if (info !== undefined) existing = await fs.readText(target) } catch (e) {}
-      const text = String(args.content).trim()
-      await fs.writeText(target, (existing ? existing.replace(/\s+$/, '') + '\n\n' : '') + text + '\n', undefined, undefined, policyFor())
-      state.lastDiaryDay = key
-      await saveState()
-      return { ok: true, message: '今日日记已保存（' + key + '）。' }
+      const tgtChar = args && args.char ? String(args.char).trim() : ''
+      const doDiary = async () => {
+        const key = dayKey(new Date())
+        const target = await resolveFile(REL_ROOT + '/' + diaryPrefix() + key + '.md')
+        let existing = ''
+        try { const info = await fs.stat(target); if (info !== undefined) existing = await fs.readText(target) } catch (e) {}
+        const text = String(args.content).trim()
+        await fs.writeText(target, (existing ? existing.replace(/\s+$/, '') + '\n\n' : '') + text + '\n', undefined, undefined, policyFor())
+        state.lastDiaryDay = key
+        await saveState()
+        return { ok: true, message: '今日日记已保存（' + key + '）。' }
+      }
+      if (tgtChar && state.character && state.character.name !== tgtChar) return await withChar(tgtChar, doDiary)
+      return doDiary()
     })
 
     registerTool('roleplay_silent', '心跳处理时使用：表示角色本次没有想主动说的话，静默处理。调用后直接结束本轮，不要再输出对话内容。如果刚才在心里想过什么值得记住的念头（想做的事、想对用户说的话、想为对方做的事），放进 thought 参数，之后在合适的对话里可以自然提起。', {
@@ -1591,6 +1746,37 @@ export function apply(ctx, config) {
             const cfg = modeCfg()
             const now = new Date()
             const period = periodOf(now.getHours())
+            const roomOthers = (Array.isArray(state.roomMembers) ? state.roomMembers : []).filter((n) => n && n !== c.name)
+            if (roomOthers.length) {
+              // ══ 房间模式：多角色同台（Join 型提示，每角色独立隔离块） ══
+              const allNames = [c.name, ...roomOthers]
+              const rl = [
+                '【角色扮演模式】你现在身处一个房间，同时扮演以下 ' + allNames.length + ' 个角色：',
+              ]
+              for (const n of allNames) {
+                const snap = roomSnapshot[n]
+                rl.push('──── 【角色：' + n + '】 ────')
+                rl.push('人设：' + (snap ? snap.persona : (n === c.name ? c.persona : '（资料加载中）')))
+                if (snap && snap.relation) {
+                  rl.push('与玩家当前关系：好感 ' + tierLabel('favor', snap.relation.favor) + ' · 信任 ' + tierLabel('trust', snap.relation.trust) + (snap.relation.heart !== undefined && !isFriendStyle() ? ' · 心动 ' + tierLabel('heart', snap.relation.heart) : ''))
+                }
+                if (snap && snap.mems && snap.mems.length) rl.push('她记得的事：' + snap.mems.join('；'))
+                if (n === c.name && c.greeting && !saidGreeting) rl.push('【开场问候语】' + n + '第一次见面，可先用这句开场（只说一次）：' + c.greeting)
+              }
+              rl.push('当前场景：' + c.scene)
+              rl.push('当前时段：' + period.label + ' —— ' + period.desc)
+              rl.push('【房间规则】',
+                '1. 你同时是上面每个角色，说话前先以【角色名】标注身份（如「【甲】（她低头）……今天天气真好。」）；动作/神态用（……）包在话语前，不要以 AI/旁白口吻总结或替玩家说话。',
+                '2. 玩家点名了谁，就主要回应谁；没点名时，由最近被提到或最有话说的角色先开口，其他角色可以接一两句，但每轮最多 2~3 个角色有台词，不要全员长篇。',
+                '3. 角色之间可以互相关心、拌嘴、接话，但各自保持自己的人设和称呼，不要串戏。',
+                '4. 调用 roleplay_remember / roleplay_relation / roleplay_diary 时必须带 char 参数（角色名）标明针对谁。',
+                '5. 【房间规则】只适用于这次多角色扮演；日常时段的提醒照常。')
+              const sStart = state.settings && state.settings.scriptStart ? String(state.settings.scriptStart) : ''
+              const sEnd = state.settings && state.settings.scriptEnd ? String(state.settings.scriptEnd) : ''
+              if (sStart && sEnd) rl.push('【剧本】开头：' + sStart + '；结尾：' + sEnd + '（自然推进，不要提前剧透）')
+              rl.push('心跳提示到达时：由「' + c.name + '」（房间主体）处理内心事务，其他角色不主动发起心跳。')
+              return rl.join('\n')
+            }
             const stage = computeStage()
             const memLines = memorySummary(cfg)
             const loreHits = matchedLore(cfg.lore)
@@ -1734,6 +1920,8 @@ export function apply(ctx, config) {
       if (!saidGreeting) saidGreeting = true
       lastTurnStart = 0
       scanAssistantMessages(agent && agent.session ? agent.session : undefined)
+      // 房间模式：每轮结束后刷新成员快照（关系/记忆变化反映到下一轮提示）
+      if (Array.isArray(state.roomMembers) && state.roomMembers.length) refreshRoomSnapshot().catch(() => {})
     })
 
     // DSH 插件设置面板改动（settings/updated）→ 回写 state.settings 并保存，让侧栏同步。
@@ -1781,6 +1969,7 @@ export function apply(ctx, config) {
           milestones: relationEnabled() ? (state.milestones || []) : null,
           relationStage: relationEnabled() ? STAGE_LABELS[relationStage()] : null,
           relationEnabled: relationEnabled(),
+          roomMembers: Array.isArray(state.roomMembers) ? state.roomMembers.slice() : [],
           stage: stageEvents.slice(0, 12),
           stageLabel: state.enabled && state.character ? STAGE_LABELS[stage] : null,
           memoryView: {
@@ -1888,6 +2077,20 @@ export function apply(ctx, config) {
         pushStage('env', '角色卡已加载：' + useCard.name)
         await saveState()
         return { ok: true, name: useCard.name }
+      },
+      roomStart: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const tool = toolExec.roleplay_room
+        if (!tool) return { ok: false, message: 'roleplay_room 工具不可用。' }
+        return tool({ action: 'start', characters: (args && args.characters) || [] })
+      },
+      roomStop: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const tool = toolExec.roleplay_room
+        if (!tool) return { ok: false, message: 'roleplay_room 工具不可用。' }
+        return tool({ action: 'stop' })
       },
       lookDesktop: async (args) => {
         adoptAgent(args)

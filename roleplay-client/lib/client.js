@@ -482,6 +482,28 @@ window.__ModuleLoader__.load({
           }
           var buy = econAct('shop-buy')
           var use = econAct('inventory-use')
+          var roomSel = React.useState('')
+          var roomStart = function () {
+            var first = st && st.character ? st.character.name : null
+            var second = roomSel[0]
+            if (!first || !second || first === second) { econMsg[1]('先选一张与当前角色不同的卡'); window.setTimeout(function () { econMsg[1](null) }, 2600); return }
+            connection.rpc.call('/roleplay', 'room-start', Object.assign(sessionId ? { sessionId: sessionId } : {}, { characters: [first, second] }))
+              .then(function (result) {
+                var v = result && result.ok && result.value ? result.value : null
+                econMsg[1](v && v.ok ? v.message : ((v && v.message) || '开房间失败'))
+                window.setTimeout(function () { econMsg[1](null) }, 2600)
+                if (sth.refresh) sth.refresh()
+              })
+          }
+          var roomStop = function () {
+            connection.rpc.call('/roleplay', 'room-stop', sessionId ? { sessionId: sessionId } : {})
+              .then(function (result) {
+                var v = result && result.ok && result.value ? result.value : null
+                econMsg[1](v && v.ok ? v.message : '关房间失败')
+                window.setTimeout(function () { econMsg[1](null) }, 2600)
+                if (sth.refresh) sth.refresh()
+              })
+          }
           var saveSettings = function () {
             var g = function (id) { var el = document.getElementById(id); return el ? el.value : '' }
             var auto = document.getElementById('rp-autolook')
@@ -658,6 +680,10 @@ window.__ModuleLoader__.load({
                           c ? React.createElement('div', { className: 'rp-sb-row' },
                             React.createElement('span', { className: 'rp-sb-k' }, '角色'),
                             React.createElement('span', null, c.name + (st.stageLabel ? ' · ' + st.stageLabel : ''))) : null,
+                          st && st.roomMembers && st.roomMembers.length ? React.createElement('div', { className: 'rp-sb-row' },
+                            React.createElement('span', { className: 'rp-sb-k' }, '房间'),
+                            React.createElement('span', null, '🗣 ' + st.roomMembers.join(' · ')),
+                            React.createElement('button', { className: 'rp-sb-card-switch', style: { marginLeft: 8, padding: '2px 8px' }, onClick: roomStop }, '关房间')) : null,
                           React.createElement('div', { className: 'rp-sb-pet-btns' },
                             React.createElement('button', { className: 'rp-sb-pet-btn rp-sb-pet-on', onClick: pet.start }, '启动桌宠'),
                             React.createElement('button', { className: 'rp-sb-pet-btn rp-sb-pet-off', onClick: pet.stop }, '关闭桌宠'))
@@ -689,6 +715,24 @@ window.__ModuleLoader__.load({
                           }, '删卡')
                         )
                       : React.createElement('div', { className: 'rp-sb-empty' }, '还没有角色卡。可在会话里说「保存角色卡」或直接提供角色设定。')
+                  ),
+                  React.createElement('div', { className: 'rp-sb-section rp-sb-cards' },
+                    React.createElement('div', { className: 'rp-sb-section-title' }, '房间 (双人)'),
+                    cards.cards.loaded
+                      ? React.createElement('div', { className: 'rp-sb-card-row' },
+                          React.createElement('select', {
+                            className: 'rp-sb-card-select',
+                            value: roomSel[0],
+                            onChange: function (ev) { roomSel[1](ev.target.value) },
+                          }, cards.cards.list.map(function (ck) {
+                            return React.createElement('option', { key: ck.id, value: ck.id }, ck.name)
+                          })),
+                          React.createElement('button', {
+                            className: 'rp-sb-card-switch',
+                            onClick: roomStart,
+                          }, '开房间')
+                        )
+                      : null
                   ),
                   React.createElement('div', { className: 'rp-fold', key: 'shop' },
                     React.createElement('div', { className: 'rp-fold-head', onClick: function () { shopOpen[1](!shopOpen[0]) } },
