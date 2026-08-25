@@ -10,6 +10,7 @@
 // 路径可配置：数据/桌宠资源基于 DSH 工作区；DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
 import os from 'node:os'
 import path from 'node:path'
+import { applyDelta, reqCheck } from './lib/relation-core.mjs?v=14'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -193,8 +194,6 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    function bfMean() { const b = state.boyfriend || DEFAULT_BOYFRIEND; return (b.reliability + b.empathy + b.stability + b.ambition) / 4 }
-    function boyfriendFactor() { return 0.6 + 0.8 * (bfMean() / 100) }
     let state = { enabled: false, character: null, lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
@@ -338,13 +337,9 @@ export function apply(ctx, config) {
       if (n >= 1 && ft >= 2) return 'acquaintance'
       return 'stranger'
     }
-    // 里程碑满足度返回（供 AI 与 UI 判断）
+    // 里程碑满足度返回（供 AI 与 UI 判断；纯函数在 relation-core.mjs）
     function mileReqCheck(m) {
-      const r = state.relation || DEFAULT_RELATION
-      if (m.req.favorTier && axisTier(r.favor) < m.req.favorTier) return '好感还差一点（' + tierLabel('favor', r.favor) + '）'
-      if (m.req.trustTier && axisTier(r.trust) < m.req.trustTier) return '信任还差一点（' + tierLabel('trust', r.trust) + '）'
-      if (m.req.heartTier && axisTier(r.heart) < m.req.heartTier) return '心动还差一点（' + tierLabel('heart', r.heart) + '）'
-      return null
+      return reqCheck(m, state.relation || DEFAULT_RELATION, TIER_LABELS)
     }
     // 记录最近行为（AI 评审素材）
     function addRecentAct(act) {
@@ -352,68 +347,21 @@ export function apply(ctx, config) {
       state.recentActs.push({ act: String(act).slice(0, 80), time: stamp() })
       if (state.recentActs.length > 8) state.recentActs.splice(0, state.recentActs.length - 8)
     }
-    // 应用 AI 关系判断：基础分 × 男友力缩放 + 里程碑校验/反哺 + 心动锁
+    // 应用 AI 关系判断：核心逻辑在 lib/relation-core.mjs（纯函数），此处只做状态落地
     function applyRelation(delta) {
-      const r = state.relation || (state.relation = { ...DEFAULT_RELATION })
-      const b = state.boyfriend || (state.boyfriend = { ...DEFAULT_BOYFRIEND })
-      const fact = boyfriendFactor()
-      const changed = []
-      const setAxis = (key, base) => {
-        if (base === undefined) return
-        const scaled = base >= 0 ? base * fact : base * (1.6 - 0.6 * fact)
-        // 心动锁：favor/trust 未到二档时禁止正增
-        if (key === 'heart' && scaled > 0 && (axisTier(r.favor) < 2 || axisTier(r.trust) < 2)) return
-        const before = r[key]
-        r[key] = clamp(r[key] + scaled, 0, 100)
-        if (Math.abs(r[key] - before) >= 0.5) changed.push(tierDelta(key, before, r[key]))
-      }
-      for (const k of RELATION_KEYS) {
-        if (isFriendStyle() && k === 'heart') continue
-        if (typeof delta[k] === 'number') setAxis(k, delta[k])
-      }
-      // 朋友向：无男友力轴（恋爱向专属）
-      if (!isFriendStyle()) {
-        for (const k of BF_KEYS) {
-          const v = delta.boyfriend && typeof delta.boyfriend[k] === 'number' ? delta.boyfriend[k] : undefined
-          if (v !== undefined) {
-            const before = b[k]
-            b[k] = clamp(b[k] + v, 0, 100)
-            if (Math.abs(b[k] - before) >= 0.5) changed.push(BF_LABELS[k] + ' ' + (v > 0 ? '+' : '') + v)
-          }
-        }
-      }
-      // 里程碑触发：校验 + 反哺
-      let milestoneMsg = null
-      const mId = delta.milestone
-      if (mId) {
-        const m = MILESTONES.find((x) => x.id === mId)
-        if (m) {
-          if ((state.milestones || []).includes(mId)) {
-            milestoneMsg = { ok: false, message: '（里程碑「' + m.name + '」已触发过）' }
-          } else {
-            const miss = mileReqCheck(m)
-            if (miss) {
-              milestoneMsg = { ok: false, message: '（她心里还差一点：' + miss + '）' }
-            } else {
-              state.milestones = state.milestones || []
-              state.milestones.push(mId)
-              const rw = m.reward
-              if (rw.favor) r.favor = clamp(r.favor + rw.favor, 0, 100)
-              if (rw.trust) r.trust = clamp(r.trust + rw.trust, 0, 100)
-              if (rw.heart) r.heart = clamp(r.heart + rw.heart, 0, 100)
-              if (rw.bfReliability) b.reliability = clamp(b.reliability + rw.bfReliability, 0, 100)
-              milestoneMsg = { ok: true, message: '（里程碑触发：' + m.name + '）', milestone: m }
-              pushStage('env', '里程碑：' + m.name)
-            }
-          }
-        }
-      }
-      return { changed, milestoneMsg, stage: relationStage() }
+      const res = applyDelta(state.relation || { ...DEFAULT_RELATION }, state.boyfriend || { ...DEFAULT_BOYFRIEND }, state.milestones || [], delta || {}, {
+        isFriend: isFriendStyle(),
+        milestonesDef: MILESTONES,
+        tierLabels: TIER_LABELS,
+        bfLabels: BF_LABELS,
+        keyLabels: { favor: '好感', trust: '信任', heart: '心动' },
+      })
+      state.relation = res.relation
+      state.boyfriend = res.boyfriend
+      state.milestones = res.milestones
+      if (res.milestoneMsg && res.milestoneMsg.ok) pushStage('env', '里程碑：' + res.milestoneMsg.milestone.name)
+      return { changed: res.changed, milestoneMsg: res.milestoneMsg, stage: relationStage() }
     }
-    function tierDelta(key, before, after) {
-      return TIER_LABELS[key][0] ? (keyLabel(key) + ' ' + (after - before > 0 ? '+' : '') + Math.round(after - before)) : null
-    }
-    function keyLabel(key) { return { favor: '好感', trust: '信任', heart: '心动' }[key] || key }
 
     function periodOf(hour) {
       if (hour >= 6 && hour < 9) return { label: '清晨', desc: '刚醒不久，还带着迷糊，声音软软的，脑子没完全开机。主动度低，但很真实。', hbIntro: '她刚醒不久，还带着一点迷糊，声音软软的' }

@@ -246,6 +246,46 @@ console.log('\nT12 里程碑');
   rmSync(b2.root, { recursive: true, force: true });
 }
 
+// ─── T13 关系核心纯函数直测 (lib/relation-core.mjs) ──────────
+console.log('\nT13 关系核心纯函数');
+{
+  const rc = await import(new URL('../agent-presets/roleplay/lib/relation-core.mjs', import.meta.url).href);
+  const R = { favor: 30, trust: 20, heart: 10 };
+  const B = { reliability: 50, empathy: 50, stability: 50, ambition: 50 };
+  const M = [
+    { id: 'm1', name: '第一次成功搭话', req: { favorTier: 1 }, reward: { favor: 6 } },
+    { id: 'm7', name: '约定的日子一起去…', req: { trustTier: 3, heartTier: 2 }, reward: { trust: 5, heart: 8 } },
+  ];
+  const opts = { milestonesDef: M, tierLabels: { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] }, bfLabels: { reliability: '靠谱' }, keyLabels: { favor: '好感', trust: '信任', heart: '心动' } };
+
+  let r = rc.applyDelta(R, B, [], { heart: 5 }, opts);
+  ok(r.relation.heart === 10, '心动锁: favor/trust 未到二档, heart 不增');
+  ok(r.changed.length === 0, '无变化不进 changed');
+
+  r = rc.applyDelta(R, B, [], { favor: 10 }, opts);
+  ok(r.relation.favor === 40 && r.changed.some((c) => String(c).includes('好感 +10')), '好感 +10 (bf 因子=1.0) → 40');
+
+  r = rc.applyDelta(R, B, [], { trust: -10 }, opts);
+  ok(Math.abs(r.relation.trust - 10) < 1e-9, '负向缩放 (1.6-0.6) → 信任 20-10=10');
+
+  r = rc.applyDelta(R, B, [], { favor: 5, heart: 5, boyfriend: { reliability: 10 } }, { ...opts, isFriend: true });
+  ok(r.relation.favor === 35 && r.relation.heart === 10, 'friend 不增 heart');
+  ok(r.boyfriend.reliability === 50, 'friend 不动男友力');
+
+  r = rc.applyDelta(R, B, [], { boyfriend: { reliability: 10 } }, opts);
+  ok(r.boyfriend.reliability === 60, '男友力 50→60');
+  ok(Math.abs(rc.boyfriendFactorOf(r.boyfriend) - 1.02) < 1e-9, 'bf 因子随男友力升到 1.02(均值52.5)');
+
+  r = rc.applyDelta(R, B, [], { milestone: 'm7' }, opts);
+  ok(r.milestoneMsg && r.milestoneMsg.ok === false && String(r.milestoneMsg.message).includes('差一点'), '里程碑门槛不足不触发');
+
+  r = rc.applyDelta(R, B, [], { milestone: 'm1' }, opts);
+  ok(r.milestoneMsg && r.milestoneMsg.ok === true && r.milestones.length === 1 && r.relation.favor === 36, 'm1 触发 + 奖励 favor+6 → 36');
+
+  r = rc.applyDelta(R, B, r.milestones, { milestone: 'm1' }, opts);
+  ok(r.milestoneMsg && r.milestoneMsg.ok === false && String(r.milestoneMsg.message).includes('已触发过'), 'm1 防重复(纯函数)');
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
