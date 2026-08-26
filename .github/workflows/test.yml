@@ -24,5 +24,5 @@ jobs:
           node --check agent-presets/roleplay-oc/roleplay-host.mjs
           node --check roleplay-client/lib/index.js
           node --check roleplay-client/lib/client.js
-      - name: 核心路径测试 (79 项)
+      - name: 核心路径测试 (T0 语法门 + T1~T21)
         run: node test/core.test.mjs

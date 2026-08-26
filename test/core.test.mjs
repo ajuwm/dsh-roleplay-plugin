@@ -5,7 +5,8 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
 const ENGINE_URL = new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url).href;
 
@@ -14,6 +15,33 @@ const failures = [];
 function ok(cond, name) {
   if (cond) { PASS++; console.log('  ✅ ' + name); }
   else { FAIL++; failures.push(name); console.log('  ❌ ' + name); }
+}
+
+// ─── T0 语法门: 仓库内全部 JS/MJS 静态检查(与 CI 同源; 防止"本地测试全绿但语法已坏"再发生) ───
+console.log('\nT0 语法门 (全部 JS/MJS)');
+{
+  const SYNTAX_FILES = [
+    'agent-presets/roleplay/roleplay-host.mjs',
+    'agent-presets/roleplay-friend/roleplay-host.mjs',
+    'agent-presets/roleplay-oc/roleplay-host.mjs',
+    'agent-presets/roleplay/lib/relation-core.mjs',
+    'agent-presets/roleplay/lib/time-core.mjs',
+    'agent-presets/roleplay/deskpet.js',
+    'roleplay-client/lib/index.js',
+    'roleplay-client/lib/client.js',
+  ];
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  let bad = 0;
+  for (const f of SYNTAX_FILES) {
+    const r = spawnSync(process.execPath, ['--check', join(root, f)], { encoding: 'utf8' });
+    if (r.status !== 0) {
+      bad++;
+      failures.push('语法: ' + f);
+      console.log('  ❌ ' + f);
+      console.log(String(r.stderr || r.stdout || '').slice(0, 500));
+    }
+  }
+  ok(bad === 0, bad === 0 ? '全部 ' + SYNTAX_FILES.length + ' 个文件语法通过' : bad + ' 个文件语法错误');
 }
 
 // 一次全新引擎实例 + 独立临时数据根（reuseRoot 传入时复用同一数据根，用于跨实例断言）
