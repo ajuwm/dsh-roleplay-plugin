@@ -202,7 +202,7 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, schema_version: SCHEMA_VERSION }
+    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -213,6 +213,7 @@ export function apply(ctx, config) {
     let saidGreeting = false
     let lastTurnAudit = null
     let lastTurnStart = 0
+    let lastStartWasResume = false
     // 工具防滥用（防打卡/防连发）：关系评估与看桌面的「同轮一次 + 最小间隔」状态
     let lastRelationTurn = 0
     let lastRelationCallAt = 0
@@ -1264,7 +1265,7 @@ export function apply(ctx, config) {
       return { ok: false, message: 'action 必须为 start / stop / list。' }
     })
 
-    registerTool('roleplay_start', '开启角色扮演：建立角色卡（名字、人设、初始场景、初始状态、可选开场问候语）并进入扮演模式，激活心跳与日记。用户要求「开始扮演/扮演一个角色」时调用；若用户只说「开始扮演」未指定角色，则恢复「上次扮演的角色」（当前角色或最近的角色卡），不要凭空新建角色。', {
+    registerTool('roleplay_start', '开启角色扮演：建立角色卡（名字、人设、初始场景、初始状态、可选开场问候语）并进入扮演模式，激活心跳与日记。用户表达想扮演时调用——触发词包括「开始/开演/进入角色/这次演(个)……/扮演 XXX/我们开始吧」等任意自然说法；若用户只表达了开演意愿但没给角色细节：先看有没有可恢复的角色（当前角色或最近角色卡），有则恢复并第一句自然确认，没有则返回引导（由引导提示词驱动的分步收集）。', {
       type: 'object',
       properties: {
         name: { type: 'string', description: '角色名字' },
@@ -1297,7 +1298,14 @@ export function apply(ctx, config) {
           args.fromResume = args.fromResume || true
         }
       }
-      if (!args.name || !args.persona) return { ok: false, message: '请告诉我角色名字和人设（例如「扮演小深：一个傲娇女仆……」），或先保存一张角色卡。' }
+      // 没有可恢复的角色(也没有正在扮演的) → 进入开局引导(分步问, 模型按提示词引导)
+      if (!args.name || !args.persona) {
+        state.onboarding = true
+        await saveState()
+        return { ok: true, onboarding: true, message: '（进入开局引导：先聊聊想要什么样的角色吧。）' }
+      }
+      state.onboarding = false
+      lastStartWasResume = !!args.fromResume
       {
         const oldKey = charKey()
         await persistMemory(oldKey)
@@ -1958,6 +1966,19 @@ export function apply(ctx, config) {
         order: 200,
         text: () => {
           if (!stateLoaded) return ''
+          // 开局引导：用户想开演但还没有任何角色/卡库 → 分步收集(用户说「你定/随机」则现场设计, 包括角色名)
+          if (!state.enabled && !state.character && state.onboarding) {
+            return [
+              '【开局引导】用户想开演但还没有角色。分步提问，每步一个问题并附示例选项（用户可直接挑，或说「你定/随机」由你现场设计，包括角色名）：',
+              '1. 演谁？（一句话形象 + 姓名 + 性格，示例：咖啡馆老板、夜班书店店员、冷面骑士……）',
+              '2. 你怎么称呼玩家？（名字/身份/你的称呼习惯；用户没答就说「你定」）',
+              '3. 世界观或场景？（现代校园/异世界/赛博都市/日常办公室……）',
+              '4. 剧情基调？（轻松日常/甜/虐/悬疑/热血……）',
+              '5. 其他偏好？（口癖/回复长度/是否允许重大转折……）',
+              '收集完成后：调用 roleplay_start 开演（name=角色名，persona=把以上信息整合成 ≤150 字人设，scene=场景，greeting=一句符合性格的开场白），然后以角色口吻开演，第一句念一遍角色卡要点（名字/性格/场景，不啰嗦）。',
+              '注意：用户只是闲聊、没有表达开演意愿时，不要强行引导。用户说「算了/别了」则停止引导，正常闲聊即可。',
+            ].join('\n')
+          }
           if (state.enabled && state.character) {
             const c = state.character
             const cfg = modeCfg()
@@ -2026,6 +2047,7 @@ export function apply(ctx, config) {
             if (now.getHours() >= 23) lines.push('（已是深夜，可以在合适的时机轻轻关心对方是不是该休息了，但不要反复催促。）')
             if (now.getHours() >= 6 && now.getHours() < 9) lines.push('（清晨时分，如果是今天第一次和对方说话，可以带着刚睡醒的软和迷糊。）')
             lines.push('当前关系：' + STAGE_LABELS[stage] + ' —— ' + STAGE_STYLES[stage])
+            if (lastStartWasResume) lines.push('（本轮是续玩：开演后第一句以角色口吻自然确认「又见面了」并承接上次进度；玩家说「换一个/重置/忘记她/忘了这些」→ 提示可以换角色卡或忘掉过去。不要每轮都提「上次」。）')
             if (relationEnabled()) {
               const r = state.relation || DEFAULT_RELATION
               const b = state.boyfriend || DEFAULT_BOYFRIEND
@@ -2207,6 +2229,7 @@ export function apply(ctx, config) {
         return {
           enabled: state.enabled,
           character: state.character,
+          onboarding: !!state.onboarding,
           lastDiaryDay: state.lastDiaryDay,
           nextHeartbeatLabel: nextLabel,
           settings: state.settings,
@@ -2272,7 +2295,17 @@ export function apply(ctx, config) {
             const cards = await readCards()
             card = cards[0] || null
           }
-          if (!card) return { ok: false, message: '还没有角色：先在对话里说「开始扮演……」，或在对话里保存一张角色卡。' }
+          if (!card) {
+            // 无任何角色/卡 → 进入开局引导：注入一条用户消息让模型开始分步引导
+            state.onboarding = true
+            startRunning = false
+            await saveState()
+            try {
+              const agent = liveAgent()
+              if (agent) agent.send(makeUserMessage('（点「开始新角色」：还没有任何角色。请按提示里的【开局引导】分步问我，我说「你定」的地方你现场设计。）', 'onboard'), 'next-turn', true)
+            } catch (e) { /* 无会话时静默 */ }
+            return { ok: true, onboarding: true, message: '（进入开局引导。）' }
+          }
           const oldKey = charKey()
           await persistMemory(oldKey)
           await persistProgress(oldKey)

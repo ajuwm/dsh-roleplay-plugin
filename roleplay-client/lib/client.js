@@ -613,8 +613,12 @@ window.__ModuleLoader__.load({
                               })
                               .catch(function () { startBusy[1](false) })
                           },
-                        }, startBusy[0] ? '开演中…' : '▶ 开始扮演'),
-                        React.createElement('div', { className: 'rp-empty-hint' }, '或在对话框里说「开始扮演……」'))
+                        }, startBusy[0] ? '开演中…' : ((cards.cards.list || []).length
+                          ? '▶ 继续上次演「' + ((cards.cards.list[cards.cards.list.length - 1] || {}).name || '') + '」'
+                          : '＋ 开始新角色')),
+                        React.createElement('div', { className: 'rp-empty-hint' }, (cards.cards.list || []).length
+                          ? '或说「开始/开演」接着演上次的'
+                          : '或说「开始/开演」——我先问你几个问题，带你创建一个角色'))
                     : React.createElement(React.Fragment, null,
                         React.createElement('button', { className: 'rp-capsule', style: { width: '100%' }, onClick: function () { capOpen[1](!capOpen[0]) } },
                           React.createElement('span', { className: 'rp-capsule-name' }, c.name),

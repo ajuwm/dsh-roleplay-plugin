@@ -625,6 +625,44 @@ console.log('\nT24 增量摘要');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T25 开局引导: 空库→引导→汇总开演 ─────────────────────────
+console.log('\nT25 开局引导');
+{
+  const b = await boot();
+  const r = await b.call('roleplay_start', {});
+  ok(r && r.ok === true && r.onboarding === true, '空库无参 start → 进入引导(onboarding=true)');
+  let st = await b.gs();
+  ok(st.onboarding === true, 'getState.onboarding=true');
+  let t = String(await b.promptText());
+  ok(t.includes('【开局引导】') && t.includes('你定/随机') && t.includes('包括角色名'), '引导提示词注入(每步可你定, 含角色名)');
+  ok(t.includes('不要强行引导'), '引导只在用户想开演时生效');
+  const r2 = await b.call('roleplay_start', { name: '甲', persona: '冷面书店店员', scene: '书店', greeting: '本店快打烊了。' });
+  ok(r2 && r2.ok === true, '引导完成: 带参 start 成功');
+  st = await b.gs();
+  ok(st.onboarding === false && st.enabled === true, 'onboarding 清除, 已开演');
+  t = String(await b.promptText());
+  ok(!t.includes('【开局引导】') && t.includes('当前关系：陌生人'), '开演后引导消失, 进入扮演');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T26 恢复确认: 续玩提示 ─────────────────────────────────
+console.log('\nT26 恢复确认');
+{
+  const root = mkdtempSync(join(tmpdir(), 'rp-t26-'));
+  mkdirSync(join(root, '.roleplay'), { recursive: true });
+  const b = await boot('love', null, '.roleplay', root);
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r = await b.call('roleplay_start', {});
+  ok(r && r.ok === true && String(r.message).includes('已开始扮演'), '无参 → 恢复上次角色');
+  let t = String(await b.promptText());
+  ok(t.includes('续玩') && t.includes('换一个'), '恢复确认提示注入(续玩/换一个)');
+  const b2 = await boot('love', null, '.roleplay', root);
+  await b2.call('roleplay_start', {});
+  t = String(await b2.promptText());
+  ok(t.includes('续玩'), '跨实例恢复同样注入确认提示');
+  rmSync(root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
