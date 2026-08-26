@@ -422,6 +422,25 @@ console.log('\nT19 模式输出规则自洽');
   rmSync(b3.root, { recursive: true, force: true });
 }
 
+// ─── T20 好感度→阶段→提示词联动(闭环验证) ───────────────────
+console.log('\nT20 好感度→阶段→提示词联动');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  let t = String(await b.promptText());
+  ok(t.includes('当前关系：陌生人'), '低好感 → 提示词引导为陌生人');
+  // 好感升到二档(30→50) + 触发里程碑 m1 → 阶段升为「普通认识」(m1 额外+6 好感奖励)
+  const r = await b.call('roleplay_relation', { favor: 20, milestone: 'm1' });
+  ok(r && r.ok === true, '关系评估执行成功');
+  const st = await b.gs();
+  ok(st.relation && st.relation.favor === 56, '好感 30+20+6(m1)=56, 女友力因子=1.0');
+  ok(st.relationStage === '普通认识', '阶段升为普通认识(里程碑1+好感二档)');
+  t = String(await b.promptText());
+  ok(t.includes('普通认识'), '提示词【当前关系】跟随阶段变化');
+  ok(!t.includes('当前关系：陌生人'), '不再显示陌生人引导');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

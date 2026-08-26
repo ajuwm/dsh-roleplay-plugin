@@ -1291,7 +1291,7 @@ export function apply(ctx, config) {
       await saveState()
       const cur = state.character && state.character.name
       if (cur && roomSnapshot[cur]) roomSnapshot[cur].mems = memory.short_term.slice(0, 2).map((x) => String(x.event).slice(0, 60))
-      const stage = computeStage()
+      const stage = relationStage()
       return { ok: true, stored: true, shortTerm: memory.short_term.length, longTerm: memory.long_term.length, stage: STAGE_LABELS[stage] }
     }
 
@@ -1383,7 +1383,7 @@ export function apply(ctx, config) {
         for (const m of memory.long_term.slice(0, 3)) results.push({ source: 'long', text: m.event, count: m.count })
         for (const m of memory.short_term.slice(0, 3)) results.push({ source: 'short', text: m.event, time: m.time })
       }
-      const stage = computeStage()
+      const stage = relationStage()
       return { query: q, total: results.length, results: results.slice(0, limit), stage: STAGE_LABELS[stage] }
     })
 
@@ -1794,7 +1794,7 @@ export function apply(ctx, config) {
               rl.push('心跳提示到达时：由「' + c.name + '」（房间主体）处理内心事务，其他角色不主动发起心跳。')
               return rl.join('\n')
             }
-            const stage = computeStage()
+            const stage = relationStage()
             const memLines = memorySummary(cfg)
             const loreHits = matchedLore(cfg.lore)
             const lines = [
@@ -1987,7 +1987,7 @@ export function apply(ctx, config) {
         hbDiag.getChecks++
         await maybeFireHeartbeat(new Date())
         const nextLabel = nextHeartbeatLabel()
-        const stage = state.enabled && state.character ? computeStage() : 'stranger'
+        const stage = state.enabled && state.character ? relationStage() : 'stranger'
         const diaryView = await readDiaryView()
         return {
           enabled: state.enabled,
