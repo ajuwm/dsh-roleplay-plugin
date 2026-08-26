@@ -397,6 +397,31 @@ console.log('\nT18 房间按卡 id 开启');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T19 三模式输出规则自洽 ─────────────────────────────────
+console.log('\nT19 模式输出规则自洽');
+{
+  const b1 = await boot();
+  await b1.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  let t = String(await b1.promptText());
+  ok(t.includes('【输出规则】') && t.includes('小说模式'), 'novel: 输出规则块(小说模式)');
+  ok(t.includes('环境氛围至多 1 句极短') && t.includes('内心独白至多 1 句极短'), 'novel: 环境≤1句/独白≤1句');
+  ok(!t.includes('当前：精简模式') && !t.includes('当前：剧本模式'), 'novel: 不混入其他模式规则');
+  rmSync(b1.root, { recursive: true, force: true });
+
+  const b2 = await boot('love', { enabled: false, character: null, settings: { narrationMode: 'compact' } });
+  await b2.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  t = String(await b2.promptText());
+  ok(t.includes('精简模式') && t.includes('不要环境描写') && t.includes('不要内心独白'), 'compact: 无环境/无独白');
+  ok(!t.includes('小说模式'), 'compact: 不含小说规则');
+  rmSync(b2.root, { recursive: true, force: true });
+
+  const b3 = await boot('love', { enabled: false, character: null, settings: { narrationMode: 'script' } });
+  await b3.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  t = String(await b3.promptText());
+  ok(t.includes('剧本模式') && t.includes('（静默）'), 'script: 剧本格式+静默呈现');
+  rmSync(b3.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
