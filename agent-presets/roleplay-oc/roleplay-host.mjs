@@ -142,7 +142,7 @@ export function apply(ctx, config) {
       // v1 → v2：无字段结构调整（仅补版本标记；后续变更在此累加）
       return parsed
     }
-    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: STYLE !== 'oc', difficulty: 2, relationEnabled: STYLE !== 'oc', relPace: 'normal' }
+    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: STYLE !== 'oc', difficulty: 2, relationEnabled: STYLE !== 'oc', relPace: 'normal', storyEnabled: true, userProfileEnabled: true, summaryEnabled: true }
     // ── 养成系统：生命体征 + 商城经济 ────────────────────────────────────
     const DEFAULT_STATS = { satiety: 75, health: 85, mood: 70, hp: 100, since: null }
     const DEFAULT_ECONOMY = { coins: 100, lastDaily: null, earnedToday: 0, lastFeedAt: 0, lastFeedDay: null, streak: 0, lastWorkDay: null, dailyGiftDay: null }
@@ -168,6 +168,10 @@ export function apply(ctx, config) {
     // 亲密度进度难度（玩家自选）：只缩放剧情评估的正负增量，档位阈值/里程碑不变
     const REL_PACE = { slow: { mul: 0.5, label: '慢热' }, normal: { mul: 1, label: '正常' }, fast: { mul: 1.5, label: '快速' } }
     function relPaceCfg() { return REL_PACE[(state.settings && state.settings.relPace) || 'normal'] || REL_PACE.normal }
+    // 生态融合三开关（默认开；关闭 = 干净卸载：工具拦截/提示词零注入/侧栏隐藏）
+    function storyEnabled() { return !(state.settings && state.settings.storyEnabled === false) }
+    function userProfileEnabled() { return !(state.settings && state.settings.userProfileEnabled === false) }
+    function summaryEnabled() { return !(state.settings && state.settings.summaryEnabled === false) }
     const TIER_LABELS = { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] }
     const RELATION_KEYS = ['favor', 'trust', 'heart']
     const BF_KEYS = ['reliability', 'empathy', 'stability', 'ambition']
@@ -335,6 +339,102 @@ export function apply(ctx, config) {
       if (!Array.isArray(state.recentActs)) state.recentActs = []
       state.recentActs.push({ act: String(act).slice(0, 80), time: stamp() })
       if (state.recentActs.length > 8) state.recentActs.splice(0, state.recentActs.length - 8)
+    }
+
+    // ── 剧情档案（小说式记忆库）：story.md 章节式 + characters/world/index，供超长剧情跨会话续写 ──
+    // 灵感/对齐自酒馆社区与 dsh-roleplay-preset 的 .roleplay-memory 设计：
+    // 引擎负责"目录与最新进展"(index.json 结构化、可靠注入)，正文/角色/世界档案是普通 md（用户可直接编辑，以修改后为准）。
+    let storyCache = null
+    const STORY_FILES = ['story.md', 'characters.md', 'world.md', 'index.md']
+    async function storyPath(name) { return resolveFile(REL_ROOT + '/story/' + name) }
+    async function storyRead(name) {
+      try {
+        const p = await storyPath(name)
+        const i = await fs.stat(p)
+        if (i !== undefined) return await fs.readText(p)
+      } catch (e) { /* 还没建立 */ }
+      return null
+    }
+    async function storyWrite(name, content) {
+      await fs.writeText(await storyPath(name), content, undefined, undefined, policyFor())
+    }
+    async function readStoryIndex() {
+      try {
+        const t = await storyRead('index.json')
+        if (!t) return null
+        const j = JSON.parse(t)
+        return (j && Array.isArray(j.chapters)) ? j : null
+      } catch (e) { return null }
+    }
+    async function refreshStoryCache() { storyCache = await readStoryIndex() }
+    function storySummaryLine() {
+      if (!storyCache) return null
+      const n = storyCache.chapters.length
+      const latest = storyCache.latest
+      if (!latest) return null
+      return '【剧情档案】已存 ' + n + ' 章故事，最近一章《' + latest.title + '》（' + (latest.time || '') + '）。最近进展：' + (latest.summary || '') + '。涉及早期剧情时先 roleplay_story(read) 再演；用户说【存档】或一个剧情段落完成时 roleplay_story(archive)。剧情档案在 ' + REL_ROOT + '/story/，用户可编辑，以修改后为准。'
+    }
+    async function storyArchive(args) {
+      const a = args || {}
+      const content = String(a.content || '').trim()
+      if (!content) return { ok: false, message: '（存档内容为空，没有可写的东西。）' }
+      const idx = storyCache || { chapters: [], latest: null }
+      const n = idx.chapters.length + 1
+      const title = String(a.title || '').trim() || ('第' + n + '章 未命名')
+      const outline = String(a.outline || '').trim()
+      const summary = String(a.summary || '').trim() || outline || content.slice(0, 60)
+      const now = stamp()
+      // 正文追加（普通 md，用户可编辑）
+      const body = await storyRead('story.md')
+      const chapter = '## ' + title + '\n**大纲**：' + (outline || '（无）') + '\n**内容**：\n' + content + '\n'
+      await storyWrite('story.md', (body ? body.replace(/\s+$/, '') + '\n\n' : '# 剧情档案\n\n') + chapter)
+      // 索引（结构化，供注入/测试）
+      idx.chapters.unshift({ title, time: now, outline })
+      idx.latest = { title, time: now, summary }
+      if (idx.chapters.length > 200) idx.chapters.length = 200
+      await storyWrite('index.json', JSON.stringify(idx, null, 2))
+      // characters.md / world.md：从角色卡与世界书生成（可编辑档案，引擎只在最新时重写合并并保留用户补充）
+      const c = state.character || {}
+      const charBlock = '# 角色档案\n\n## ' + (c.name || '（未名）') + '\n**人设**：' + (c.persona || '（未填）') + (c.scene ? '\n**当前场景**：' + c.scene : '') + '\n'
+      const existingChars = await storyRead('characters.md')
+      await storyWrite('characters.md', (existingChars || '# 角色档案\n\n').indexOf('## ' + (c.name || '')) >= 0 ? existingChars : charBlock + (existingChars || '').replace(/^# 角色档案[\s\S]*?\n\n/, ''))
+      const wb = (memory.worldbook || []).map((w) => '- ' + (w.content || w.name || '')).join('\n')
+      await storyWrite('world.md', '# 世界观档案\n\n' + (wb || '（暂无世界观资料。') + '\n')
+      await storyWrite('index.md', '# 剧情档案索引\n\n- 正文：' + STORY_FILES[0] + '（已存 ' + n + ' 章）\n- 角色档案：characters.md\n- 世界观：world.md\n\n**最近进展**：' + summary + '\n\n**当前时间**：' + now + '\n')
+      // 存档时顺带刷新浓缩摘要（与"最近进展"同源，供提示词常驻注入）
+      if (summaryEnabled()) state.storySummary = summary.slice(0, 300)
+      await refreshStoryCache()
+      return { ok: true, chapter: n, title, message: '已存档：' + title }
+    }
+
+    // ── 用户人设档案（你是谁：身份/外貌/背景/称呼/说话方式）——
+    // 预设级一份（跨角色共享，因为"你"在每个角色面前是同一个人）；空档案不注入。
+    async function readUserProfile() {
+      try {
+        const p = await resolveFile(REL_ROOT + '/user-profile.json')
+        const i = await fs.stat(p)
+        if (i === undefined) return null
+        const j = JSON.parse(await fs.readText(p))
+        return (j && typeof j === 'object') ? j : null
+      } catch (e) { return null }
+    }
+    async function writeUserProfile(p) {
+      await fs.writeText(await resolveFile(REL_ROOT + '/user-profile.json'), JSON.stringify(p, null, 2), undefined, undefined, policyFor())
+    }
+    function userProfileLines() {
+      if (!userProfileEnabled()) return null
+      const u = state.userProfile
+      if (!u) return null
+      const out = []
+      const kv = (k, v) => { const s = String(v || '').trim(); if (s) out.push('- ' + k + '：' + s.slice(0, 120)) }
+      kv('称呼', u.nickname || u.name)
+      if (u.name && u.name !== u.nickname) kv('名字', u.name)
+      kv('身份', u.identity)
+      kv('外貌', u.appearance)
+      kv('背景', u.background)
+      kv('说话方式', u.speechStyle)
+      kv('备注', u.notes)
+      return out.length ? '【用户】这是玩家' + (u.nickname ? '「' + u.nickname + '」' : '') + '的人物档案（你对"他/她"的认知，不是设定数据表）：\n' + out.join('\n') : null
     }
     // 应用 AI 关系判断：核心逻辑在 lib/relation-core.mjs（纯函数），此处只做状态落地
     function applyRelation(delta) {
@@ -625,7 +725,7 @@ export function apply(ctx, config) {
     // 按角色隔离的「进度」：亲密度（好感/信任/心动/男友力/里程碑）、养成数值（stats/economy）、
     // 背包、攒钱目标、纪念日、近期记录、日记日期 —— 每个角色一份 progress-<角色名>.json。
     // 切换角色时 persist 旧的、load 新的；character.json 不再存这些字段（只留角色卡与设置）。
-    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay']
+    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay', 'storySummary']
     function stateForSave() {
       const out = {}
       for (const k of Object.keys(state)) if (!PROGRESS_FIELDS.includes(k)) out[k] = state[k]
@@ -657,6 +757,7 @@ export function apply(ctx, config) {
             if (Array.isArray(p.recentActs)) state.recentActs = p.recentActs
             if (Array.isArray(p.relRecent)) state.relRecent = p.relRecent.slice(-8)
             state.lastDecayAt = (typeof p.lastDecayAt === 'number' && Number.isFinite(p.lastDecayAt)) ? p.lastDecayAt : null
+            if (typeof p.storySummary === 'string') state.storySummary = p.storySummary.slice(0, 500) || null
             if (p.lastDiaryDay !== undefined) state.lastDiaryDay = p.lastDiaryDay || null
           }
           return
@@ -677,6 +778,7 @@ export function apply(ctx, config) {
         state.lastDiaryDay = null
         state.relRecent = []
         state.lastDecayAt = null
+        state.storySummary = null
       }
       await persistProgress(key)
     }
@@ -751,6 +853,7 @@ export function apply(ctx, config) {
           state.recentActs = Array.isArray(state.recentActs) ? state.recentActs : []
           state.relRecent = Array.isArray(state.relRecent) ? state.relRecent.slice(-8) : []
           state.lastDecayAt = (typeof state.lastDecayAt === 'number' && Number.isFinite(state.lastDecayAt)) ? state.lastDecayAt : null
+          state.storySummary = (typeof state.storySummary === 'string' && state.storySummary) ? state.storySummary.slice(0, 500) : null
         }
         memory = await loadMemory(charKey())
         await loadProgress(charKey(), true)
@@ -758,6 +861,8 @@ export function apply(ctx, config) {
       } catch (e) { console.error('roleplay: load failed', e) }
       stateLoaded = true
       decayIfAway()
+      refreshStoryCache()
+      state.userProfile = await readUserProfile()
     }
 
     function ensureLoaded() {
@@ -1443,6 +1548,46 @@ export function apply(ctx, config) {
       return { query: q, total: results.length, results: results.slice(0, limit), stage: STAGE_LABELS[stage] }
     })
 
+    registerTool('roleplay_story', '剧情档案（小说式记忆库）：把完成的一个剧情段落整理成章节存档（story.md，另含角色档案/世界观/索引），超长剧情跨会话续写不遗忘。一个剧情段落完成（约 10~15 轮、场景转场、时间跳跃、重要事件收尾）或用户说【存档】时 archive；涉及早期剧情（角色说过的话、发生过的事、埋的伏笔）时先 read 再演，保持前后一致；用户想看档案、或你要在台词里确认"上次…"时也可 list/read。', {
+      type: 'object',
+      properties: {
+        action: { type: 'string', description: 'archive=把当前段落存成一章；list=列章节；read=读最近一章内容；summarize=更新剧情浓缩概况（每 5~8 轮/重要转折时调用，≤300 字）' },
+        title: { type: 'string', description: '章节标题（archive 用，如「美术馆之约」）' },
+        outline: { type: 'string', description: '大纲 3~5 行（archive 用，简述该章发生了什么、伏笔、情绪节点）' },
+        content: { type: 'string', description: '章节正文：保留关键对话、事件、伏笔、情绪节点（archive 必填）' },
+        summary: { type: 'string', description: '一句话最新进展（archive 用，缺省用大纲首行）' },
+      },
+      required: ['action'],
+    }, async (args) => {
+      await ensureLoaded()
+      const act = String((args && args.action) || '').trim()
+      if (act !== 'summarize' && !storyEnabled()) return { ok: false, skipped: true, message: '（剧情档案已关闭。）' }
+      if (act === 'summarize') {
+        if (!summaryEnabled()) return { ok: false, skipped: true, message: '（剧情概况已关闭。）' }
+        const s = String((args && args.summary) || '').trim().slice(0, 300)
+        if (!s) return { ok: false, message: '（概要为空。）' }
+        state.storySummary = s
+        await saveState()
+        return { ok: true, message: '剧情概况已更新。' }
+      }
+      if (act === 'archive') return storyArchive(args)
+      if (act === 'list') {
+        const idx = storyCache || (await readStoryIndex())
+        if (!idx || !idx.chapters.length) return { ok: true, chapters: [], message: '（还没有存档。）' }
+        return { ok: true, chapters: idx.chapters.map((c) => ({ title: c.title, time: c.time })), message: '共 ' + idx.chapters.length + ' 章。' }
+      }
+      if (act === 'read') {
+        const body = await storyRead('story.md')
+        const idx = storyCache || (await readStoryIndex())
+        const latest = idx && idx.latest
+        if (!body || !latest) return { ok: true, chapter: null, content: '', message: '（还没有存档。）' }
+        // 取最近一章正文
+        const m = body.match(/## [\s\S]*?$/)
+        return { ok: true, chapter: latest.title, content: body, message: '最近一章：' + latest.title }
+      }
+      return { ok: false, message: '（action 需为 archive/list/read。）' }
+    })
+
     registerTool('roleplay_clear_memory', '清空角色的所有记忆：短期记忆、长期记忆、用户偏好、已谈话题、事件计数（关系阶段回到陌生人）。用户要求重置记忆/忘掉过去时调用。', { type: 'object', properties: {} }, async () => {
       await ensureLoaded()
       memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [] }
@@ -1910,7 +2055,14 @@ export function apply(ctx, config) {
                 lines.push(relAnchor)
               }
             }
+            const upLine = userProfileLines()
+            if (upLine) lines.push(upLine)
             if (memLines.length) lines.push('记忆（角色记得这些）：\n' + memLines.join('\n'))
+            if (summaryEnabled() && state.storySummary) lines.push('【剧情概况】（长剧情浓缩印象，保持连续）：' + String(state.storySummary).slice(0, 300))
+            if (storyEnabled()) {
+              const sLine = storySummaryLine()
+              if (sLine) lines.push(sLine)
+            }
             lines.push('（日记是玩家读到的彩蛋，不是你记忆的一部分；不要引用日记内容，也不要用"日记里写过"来作答。）')
             if (Array.isArray(memory.unspoken) && memory.unspoken.length) {
               lines.push('没来得及说出口的念头（如果合适，可以在对话中自然提起，不必每轮都提，也不要说破来源）：')
@@ -1947,6 +2099,7 @@ export function apply(ctx, config) {
               outRules = [
                 '【输出规则】（当前：小说模式）',
                 '· 动作/神态 1~3 个（每个都很短，如「低头」「笑了一下」）；环境氛围至多 1 句极短（≤15 字）；内心独白至多 1 句极短。',
+                '· 排版约定（酒馆社区惯例）：台词用中文引号“……”；动作、神态用「……」；内心独白用（……）。',
               ]
             }
             outRules.push(
@@ -1954,7 +2107,7 @@ export function apply(ctx, config) {
               '· 台词要口语化，像真人说话（短句、语气词、自然的停顿）；只有在感伤、认真、告白这类关键时刻，才允许一点文彩（像电影台词）。',
               '· 口癖（哼 / 才不是 / 笨蛋…）要克制：每轮最多出现 1 次，只在被戳穿、害羞、生气这类时刻；平时说话干净。',
               '· 避免模板化句式：严禁反复使用「不是……而是……」「才不是……呢」这类固定句式；每轮开头方式要轮换（动作开场 / 直接一句台词 / 问句开场 / 心里的话），连续两轮不要用相同开场；长短句交替。',
-              '· 思考（内部预演）一律用英文书写（台词与动作仍用中文）：先第三人称 objective analysis（她注意到什么、对方什么心情、这轮关键点），再第一人称角色心声（用人设语气，口癖克制）。注意：思考是内部预演，不算输出——输出里的独白按本模式规则执行。',
+              '· 思考（内部预演）一律用英文书写（台词与动作仍用中文）：完全以角色身份沉浸（官方「角色沉浸」要求）——第一段站在「' + c.name + '」的立场客观分析局面（对方什么心情、本轮关键点、她注意到什么），第二段第一人称角色心声（心里话，用人设语气，口癖克制）。禁止以助手/评测视角分析剧情。注意：思考是内部预演，不算输出——输出里的独白按本模式规则执行。',
               '· 她可以不说话：不想接话、情绪低、觉得没话说时不要硬找话。可选回应：只给一个（……）短动作（走开 / 背过身 / 安静做自己的事）、一个「……」、或一句极短敷衍（「嗯。」「随你。」）。沉默之后不要补解释、不要道歉、不要又找话圆场——安静就让它安静。'
             )
             lines.push(
@@ -1966,6 +2119,7 @@ export function apply(ctx, config) {
               '6. 用户要求结束扮演时调用 roleplay_stop。',
               '7. 如果她心里冒出「想攒钱给用户买点什么」的念头（比如注意到用户喜欢某样东西、想送一份特别的礼物），可以用 roleplay_saving 自主立下攒钱目标；没有这种念头就不必立。',
               '8. 每轮对话结束、或发生值得记住的互动（关键事件、守约/失约、她难受时你在、记住她喜好、关系出现转折）时，调用 roleplay_relation 评估并更新亲密度（好感/信任/心动/男友力/里程碑）：按行为而非频率、事件重于日常、负向要真实、同一行为重复加成递减；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任；心动需好感+信任到位才可正增；评价后不要向玩家汇报数值，只在迈向新档位/里程碑时于台词里自然暗示一句。',
+              '9. 剧情连续性（长剧情不遗忘）：一个剧情段落完成（约 10~15 轮、场景转场、重要事件收尾）或用户说【存档】时，调用 roleplay_story(archive) 把该段落整理成章节（标题 + 大纲 3~5 行 + 正文保留关键对话/伏笔/情绪节点）；剧情推进或转折时顺手 roleplay_story(summarize) 更新一段 ≤300 字的剧情概况；涉及早期剧情、角色说过的话、埋下的伏笔时，先 roleplay_story(read) 或 roleplay_recall 再演，保证前后一致。新会话若在提示词里看到【剧情档案】，可以自然提一句「我记得上次……」（不每轮提）。',
               ...outRules
             )
             return lines.join('\n')
@@ -2070,6 +2224,9 @@ export function apply(ctx, config) {
           relationEnabled: relationEnabled(),
           relPace: (state.settings && state.settings.relPace) || 'normal',
           relRecent: Array.isArray(state.relRecent) ? state.relRecent.slice(-4) : [],
+          userProfile: userProfileEnabled() ? (state.userProfile || null) : null,
+          storyIndex: storyEnabled() ? (storyCache ? { chapters: storyCache.chapters.length, latest: storyCache.latest ? storyCache.latest.title : null } : null) : null,
+          storySummary: summaryEnabled() ? (state.storySummary || null) : null,
           roomMembers: Array.isArray(state.roomMembers) ? state.roomMembers.slice() : [],
           stage: stageEvents.slice(0, 12),
           stageLabel: state.enabled && state.character ? STAGE_LABELS[stage] : null,
@@ -2259,6 +2416,9 @@ export function apply(ctx, config) {
         if (s.statsEnabled !== undefined) state.settings.statsEnabled = !!s.statsEnabled
         if (s.difficulty === 1 || s.difficulty === 2 || s.difficulty === 3) state.settings.difficulty = s.difficulty
         if (s.relPace === 'slow' || s.relPace === 'normal' || s.relPace === 'fast') state.settings.relPace = s.relPace
+        if (s.storyEnabled !== undefined) state.settings.storyEnabled = !!s.storyEnabled
+        if (s.userProfileEnabled !== undefined) state.settings.userProfileEnabled = !!s.userProfileEnabled
+        if (s.summaryEnabled !== undefined) state.settings.summaryEnabled = !!s.summaryEnabled
         if (s.relationEnabled !== undefined) state.settings.relationEnabled = !!s.relationEnabled
         if (state.character) {
           if (typeof s.persona === 'string' && s.persona.trim()) state.character.persona = s.persona
@@ -2276,6 +2436,20 @@ export function apply(ctx, config) {
             scene: state.character.scene, mode: state.character.mode, greeting: state.character.greeting,
           } : null,
         }
+      },
+      userProfileUpdate: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        if (!userProfileEnabled()) return { ok: false, message: '（用户档案已关闭。）' }
+        const a = (args && args.profile) ? args.profile : {}
+        const clean = (v, max) => String(v || '').trim().slice(0, max)
+        state.userProfile = {
+          name: clean(a.name, 60), nickname: clean(a.nickname, 40), identity: clean(a.identity, 200),
+          appearance: clean(a.appearance, 200), background: clean(a.background, 300),
+          speechStyle: clean(a.speechStyle, 200), notes: clean(a.notes, 200),
+        }
+        await writeUserProfile(state.userProfile)
+        return { ok: true, profile: state.userProfile }
       },
       deleteCard: async (args) => {
         adoptAgent(args)

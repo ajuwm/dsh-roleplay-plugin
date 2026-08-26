@@ -551,6 +551,9 @@ window.__ModuleLoader__.load({
                 difficulty: Number(g('rp-diff')) || 2,
                 relationEnabled: !!(document.getElementById('rp-relen') && document.getElementById('rp-relen').checked),
                 relPace: g('rp-relpace') || 'normal',
+                storyEnabled: !!(document.getElementById('rp-storyen') && document.getElementById('rp-storyen').checked),
+                summaryEnabled: !!(document.getElementById('rp-summen') && document.getElementById('rp-summen').checked),
+                userProfileEnabled: !!(document.getElementById('rp-uppen') && document.getElementById('rp-uppen').checked),
                 persona: g('rp-persona'),
                 scene: g('rp-scene'),
                 mode: g('rp-mode'),
@@ -559,6 +562,20 @@ window.__ModuleLoader__.load({
             })).then(function (result) {
               var v = result && result.ok && result.value ? result.value : null
               saveMsg[1](v && v.ok ? '已保存 ✓' : '保存失败')
+              window.setTimeout(function () { saveMsg[1](null) }, 2500)
+              if (sth.refresh) sth.refresh()
+            }).catch(function () { saveMsg[1]('保存失败') })
+          }
+          var saveProfile = function () {
+            var g = function (id) { var el = document.getElementById(id); return el ? el.value : '' }
+            connection.rpc.call('/roleplay', 'user-profile-update', Object.assign(sessionId ? { sessionId: sessionId } : {}, {
+              profile: {
+                nickname: g('rp-upnick'), identity: g('rp-upid'), appearance: g('rp-upapp'),
+                background: g('rp-upbg'), speechStyle: g('rp-upsp'),
+              },
+            })).then(function (result) {
+              var v = result && result.ok && result.value ? result.value : null
+              saveMsg[1](v && v.ok ? '档案已保存 ✓' : '保存失败')
               window.setTimeout(function () { saveMsg[1](null) }, 2500)
               if (sth.refresh) sth.refresh()
             }).catch(function () { saveMsg[1]('保存失败') })
@@ -891,7 +908,38 @@ window.__ModuleLoader__.load({
                           React.createElement('option', { value: 'slow' }, '慢热（涨得慢，细水长流）'),
                           React.createElement('option', { value: 'normal' }, '正常'),
                           React.createElement('option', { value: 'fast' }, '快速（进展飞快）'))
-                      )
+                      ),
+                      React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-storyen' },
+                        React.createElement('input', { id: 'rp-storyen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.storyEnabled === false) }),
+                        '剧情档案（章节式故事库）'),
+                      React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-summen' },
+                        React.createElement('input', { id: 'rp-summen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.summaryEnabled === false) }),
+                        '剧情概况（浓缩摘要防遗忘）'),
+                      React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-uppen' },
+                        React.createElement('input', { id: 'rp-uppen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.userProfileEnabled === false) }),
+                        '用户档案（角色对你的认知）'),
+                      React.createElement('div', { className: 'rp-sb-set-label', style: { margin: '6px 0 2px' } }, '我的档案'),
+                      React.createElement('div', { className: 'rp-sb-set-row' },
+                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upnick' }, '称呼'),
+                        React.createElement('input', { id: 'rp-upnick', className: 'rp-sb-set-input', defaultValue: (st && st.userProfile && st.userProfile.nickname) || '', placeholder: '她怎么叫你' })
+                      ),
+                      React.createElement('div', { className: 'rp-sb-set-row' },
+                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upid' }, '身份'),
+                        React.createElement('input', { id: 'rp-upid', className: 'rp-sb-set-input', defaultValue: (st && st.userProfile && st.userProfile.identity) || '', placeholder: '学生/社畜/旅人…' })
+                      ),
+                      React.createElement('div', { className: 'rp-sb-set-row' },
+                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upapp' }, '外貌'),
+                        React.createElement('input', { id: 'rp-upapp', className: 'rp-sb-set-input', defaultValue: (st && st.userProfile && st.userProfile.appearance) || '', placeholder: '一两句话，她眼里记住的样子' })
+                      ),
+                      React.createElement('div', { className: 'rp-sb-set-row', style: { alignItems: 'flex-start' } },
+                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upbg', style: { paddingTop: 4 } }, '背景'),
+                        React.createElement('textarea', { id: 'rp-upbg', className: 'rp-sb-set-textarea', defaultValue: (st && st.userProfile && st.userProfile.background) || '', placeholder: '她该知道的你（擅长/经历/秘密…）' })
+                      ),
+                      React.createElement('div', { className: 'rp-sb-set-row', style: { alignItems: 'flex-start' } },
+                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upsp', style: { paddingTop: 4 } }, '说话方式'),
+                        React.createElement('textarea', { id: 'rp-upsp', className: 'rp-sb-set-textarea', defaultValue: (st && st.userProfile && st.userProfile.speechStyle) || '', placeholder: '你怎么说话：简短/毒舌/爱开玩笑…' })
+                      ),
+                      React.createElement('button', { className: 'rp-sb-set-save', onClick: saveProfile }, '保存我的档案')
                     ) : null,
                     React.createElement('button', { className: 'rp-sb-set-save', onClick: saveSettings }, '保存设置'),
                     saveMsg[0] ? React.createElement('div', { className: 'rp-sb-set-msg' }, saveMsg[0]) : null

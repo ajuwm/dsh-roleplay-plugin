@@ -541,6 +541,90 @@ console.log('\nT21 好感度增减守护');
   rmSync(b7.root, { recursive: true, force: true });
 }
 
+// ─── T22 剧情档案(章节式记忆库) ────────────────────────────────
+console.log('\nT22 剧情档案');
+{
+  const root = mkdtempSync(join(tmpdir(), 'rp-t22-'));
+  mkdirSync(join(root, '.roleplay'), { recursive: true });
+  const b = await boot('love', null, '.roleplay', root);
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲 话少心软' });
+  await b.call('roleplay_remember', { event: '一起去美术馆', kind: '一起活动' });
+  const ra = await b.call('roleplay_story', { action: 'archive', title: '美术馆之约', outline: '第一次一起出门，她有点紧张', content: '她站在门前等了十分钟才抬脚…', summary: '美术馆之约，气氛升温' });
+  ok(ra && ra.ok === true && ra.chapter === 1, 'archive: 第一章存档成功');
+  let body = readFileSync(join(root, '.roleplay', 'story', 'story.md'), 'utf8');
+  ok(body.includes('## 美术馆之约') && body.includes('她站在门前等了十分钟'), 'story.md 含章节标题与正文');
+  const idx = JSON.parse(readFileSync(join(root, '.roleplay', 'story', 'index.json'), 'utf8'));
+  ok(idx.chapters.length === 1 && idx.latest.title === '美术馆之约', 'index.json 目录与最新进展');
+  const chars = readFileSync(join(root, '.roleplay', 'story', 'characters.md'), 'utf8');
+  ok(chars.includes('甲'), 'characters.md 含角色');
+  const rl = await b.call('roleplay_story', { action: 'list' });
+  ok(rl && rl.chapters && rl.chapters.length === 1, 'list 返回章节目录');
+  const rd = await b.call('roleplay_story', { action: 'read' });
+  ok(rd && rd.ok === true && String(rd.content).includes('美术馆之约'), 'read 返回章节内容');
+  let t = String(await b.promptText());
+  ok(t.includes('【剧情档案】') && t.includes('美术馆之约'), '提示词注入【剧情档案】');
+  ok(t.includes('【剧情概况】') && t.includes('美术馆之约，气氛升温'), '提示词注入【剧情概况】(archive 顺带更新摘要)');
+
+  const b2 = await boot('love', null, '.roleplay', root);
+  await b2.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  t = String(await b2.promptText());
+  ok(t.includes('【剧情档案】') && t.includes('美术馆之约'), '跨恢复: 新实例提示词含档案');
+  rmSync(root, { recursive: true, force: true });
+
+  const b3 = await boot();
+  await b3.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  t = String(await b3.promptText());
+  ok(!t.includes('最近进展：') && !t.includes('长剧情浓缩印象'), '无档案时零注入');
+  await b3.svc.updateSettings({ sessionId: 't-session', settings: { storyEnabled: false, summaryEnabled: false } });
+  const rb = await b3.call('roleplay_story', { action: 'archive', title: 'x', content: 'y' });
+  ok(rb && rb.skipped === true, '关闭剧情档案: 工具被拦');
+  rmSync(b3.root, { recursive: true, force: true });
+}
+
+// ─── T23 用户人设档案 ────────────────────────────────────────
+console.log('\nT23 用户人设档案');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const up = await b.svc.userProfileUpdate({ sessionId: 't-session', profile: { nickname: '阿离', identity: '夜班打工仔', appearance: '黑框眼镜', background: '喜欢猫', speechStyle: '话少' } });
+  ok(up && up.ok === true && up.profile && up.profile.nickname === '阿离', 'userProfileUpdate 成功');
+  const st = await b.gs();
+  ok(st.userProfile && st.userProfile.nickname === '阿离', 'getState 返回档案');
+  const t = String(await b.promptText());
+  ok(t.includes('【用户】') && t.includes('阿离') && t.includes('夜班打工仔'), '提示词注入【用户】区块');
+  rmSync(b.root, { recursive: true, force: true });
+
+  const b2 = await boot();
+  await b2.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  let t2 = String(await b2.promptText());
+  ok(!t2.includes('【用户】'), '无档案不注入');
+  await b2.svc.updateSettings({ sessionId: 't-session', settings: { userProfileEnabled: false } });
+  const up2 = await b2.svc.userProfileUpdate({ sessionId: 't-session', profile: { nickname: 'X' } });
+  ok(up2 && up2.ok === false, '关闭用户档案: 写入被拦');
+  const st2 = await b2.gs();
+  ok(st2.userProfile === null, '关闭用户档案: getState 不返回');
+  rmSync(b2.root, { recursive: true, force: true });
+}
+
+// ─── T24 增量摘要(浓缩剧情概况) ──────────────────────────────
+console.log('\nT24 增量摘要');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r = await b.call('roleplay_story', { action: 'summarize', summary: '认识一周，她开始主动找你聊天。' });
+  ok(r && r.ok === true, 'summarize 成功');
+  const st = await b.gs();
+  ok(st.storySummary === '认识一周，她开始主动找你聊天。', 'getState 返回摘要');
+  const t = String(await b.promptText());
+  ok(t.includes('【剧情概况】') && t.includes('认识一周'), '提示词注入【剧情概况】');
+
+  const b2 = await boot('love', null, '.roleplay', b.root);
+  await b2.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const t2 = String(await b2.promptText());
+  ok(t2.includes('认识一周'), '跨实例: 摘要持久化(progress)');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

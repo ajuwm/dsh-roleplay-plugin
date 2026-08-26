@@ -95,6 +95,10 @@ export default {
           const value = await face.updateSettings({ sessionId, settings: payload && payload.settings })
           return { ok: !!value.ok, value }
         }
+        if (endpoint === 'user-profile-update') {
+          const value = await face.userProfileUpdate({ sessionId, profile: payload && payload.profile })
+          return { ok: !!value.ok, value }
+        }
         if (endpoint === 'cards-delete') {
           const value = await face.deleteCard({ sessionId, card: payload && payload.card })
           return { ok: !!value.ok, value }
