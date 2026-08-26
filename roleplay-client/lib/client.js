@@ -632,13 +632,13 @@ window.__ModuleLoader__.load({
                                 React.createElement('div', { className: 'rp-stat-track' },
                                   React.createElement('div', { className: 'rp-stat-fill ' + d[2], style: { width: Math.max(0, Math.min(100, st.relation[d[0]] || 0)) + '%' } })),
                                 React.createElement('span', { className: 'rp-stat-tier' }, relTier(d[0], st.relation[d[0]] || 0)),
-                                React.createElement('span', { className: 'rp-stat-val' }, String(Math.round(st.relation[d[0]] || 0)))
+                                React.createElement('span', { className: 'rp-stat-val' }, String(Math.round(st.relation[d[0]] || 0))))
                             }),
                             (st.relRecent && st.relRecent.length ? React.createElement('div', { className: 'rp-sb-row' },
                               React.createElement('span', { className: 'rp-sb-k' }, '最近变化'),
                               React.createElement('span', null, relRecentText(st.relRecent[st.relRecent.length - 1])),
                               React.createElement('span', { style: { flex: 1 } }),
-                              React.createElement('span', { className: 'rp-fold-coins' }, ({ slow: '慢热', normal: '正常', fast: '快速' }[st.relPace] || '正常')))
+                              React.createElement('span', { className: 'rp-fold-coins' }, ({ slow: '慢热', normal: '正常', fast: '快速' }[st.relPace] || '正常'))
                       ) : React.createElement('span', null, '')),
                             BF_DEFS.map(function (b) {
                               return React.createElement('div', { className: 'rp-stat-row', key: b[0] },
