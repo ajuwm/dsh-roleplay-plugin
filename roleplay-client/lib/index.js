@@ -35,12 +35,19 @@ export default {
     if (settingsSvc !== undefined) {
       try { settingsSvc.register('roleplay', ROLEPLAY_SETTINGS_SCHEMA) } catch (e) { /* 已注册等：忽略 */ }
     }
+    // 诊断：connection/降级原因打印到 DSH 终端（非静默,便于定位 HTTP 405）
+    console.error('[roleplay-client] apply: connection=', connection !== undefined ? 'present' : 'MISSING',
+      '| rpc=', connection && connection.rpc !== undefined ? 'present' : 'MISSING',
+      '| rpc.handle=', connection && connection.rpc && typeof connection.rpc.handle === 'function' ? 'function' : 'NO')
+    if (connection !== undefined) console.error('[roleplay-client] connection keys:', Object.keys(connection).join(','))
     // 无 connection 服务（非 web 组合/旧版本）：静默降级，不抛错
     if (connection === undefined || connection.rpc === undefined) {
       ctx.effect(() => undefined, 'roleplay-client: degraded (no connection service)')
       return
     }
-    const disposeChannel = connection.rpc.handle('/roleplay', async (endpoint, payload) => {
+    let disposeChannel = null
+    try {
+      disposeChannel = connection.rpc.handle('/roleplay', async (endpoint, payload) => {
       try {
         // 命名空间级设置读写：直连 DSH「插件设置」的 roleplay 命名空间（浏览器卡片用），
         // 不依赖会话/face；roleplay-host 经 settings/updated 事件同步到 state.settings。
@@ -132,6 +139,10 @@ export default {
         return { ok: false, error: { code: 'handler-error', message } }
       }
     }, { authority: 'loopback' })
-    ctx.effect(() => disposeChannel, 'roleplay-client: /roleplay channel')
+    } catch (error) {
+      console.error('[roleplay-client] rpc.handle registration FAILED:', error instanceof Error ? error.message : String(error))
+      disposeChannel = null
+    }
+    ctx.effect(() => (typeof disposeChannel === 'function' ? disposeChannel : undefined), 'roleplay-client: /roleplay channel')
   },
 }
