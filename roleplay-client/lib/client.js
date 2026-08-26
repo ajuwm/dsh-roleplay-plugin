@@ -74,6 +74,8 @@ window.__ModuleLoader__.load({
           '.rp-sb-stop:hover { background:rgba(220,100,100,.12); }',
           '.rp-sb-pet-btns { display:flex; gap:8px; margin-top:6px; }',
           '.rp-sb-room-badge { flex:1 1 auto; font-size:13px; color:inherit; opacity:.92; }',
+          '.rp-turn-badge { display:inline-flex; align-items:center; gap:4px; margin:6px 0 2px; padding:2px 10px; border-radius:999px; font-size:11px; opacity:.55; border:1px solid rgba(128,128,128,.25); background:rgba(128,128,128,.06); user-select:none; }',
+          '.rp-turn-badge:hover { opacity:.85; }',
           '.rp-sb-pet-btn { flex:1; padding:6px 0; border-radius:8px; cursor:pointer; font-size:13px; }',
           '.rp-sb-pet-on { border:1px solid rgba(120,200,140,.5); background:transparent; color:#a8d8b4; }',
           '.rp-sb-pet-on:hover { background:rgba(120,200,140,.12); }',
@@ -439,6 +441,21 @@ window.__ModuleLoader__.load({
                   statusText ? React.createElement('span', { className: 'rp-dock-meta' }, statusText) : null
                 )
               )
+            }
+          )
+        })
+
+        // ── 对话消息尾部徽章：角色扮演会话的每条角色消息下挂一枚 🎭 标签 ──
+        slots.inject('conversation.chat.turnTail', function () {
+          return slots.register(
+            { name: 'conversation.chat.turnTail', select: function () { return { rp: true } } },
+            function (props) {
+              var seg = useRoleplayState(props && props.sessionId)
+              var st = seg.st
+              if (!st || !st.enabled || !st.character) return null
+              var label = '🎭 ' + st.character.name + (st.stageLabel ? ' · ' + st.stageLabel : '')
+              if (st.roomMembers && st.roomMembers.length) label = '🎭 房间 ' + st.roomMembers.join(' · ')
+              return React.createElement('div', { className: 'rp-turn-badge' }, label)
             }
           )
         })
