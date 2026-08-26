@@ -487,6 +487,7 @@ window.__ModuleLoader__.load({
           var look = useLookDesktop(sessionId)
           var cardSel = React.useState('')
           var startBusy = React.useState(false)
+          var startMsg = React.useState(null)
           var saveMsg = React.useState(null)
           var shopOpen = React.useState(false)
           var packOpen = React.useState(false)
@@ -606,19 +607,26 @@ window.__ModuleLoader__.load({
                             startBusy[1](true)
                             connection.rpc.call('/roleplay', 'start', sessionId ? { sessionId: sessionId } : {})
                               .then(function (result) {
+                                var v = result && result.ok && result.value ? result.value : null
+                                if (v && v.ok === false) { startMsg[1](v.message || '开始失败') }
+                                else if (v && v.name) { startMsg[1]('已开演「' + v.name + '」') }
+                                else if (v && v.onboarding) { startMsg[1]('（进入开局引导：让 TA 问你想演谁吧）') }
+                                else if (result && result.error) { startMsg[1](result.error.message || '开始失败') }
                                 window.setTimeout(function () {
                                   startBusy[1](false)
                                   if (sth.refresh) sth.refresh()
                                 }, 1200)
+                                window.setTimeout(function () { startMsg[1](null) }, 3500)
                               })
-                              .catch(function () { startBusy[1](false) })
+                              .catch(function (e) { startBusy[1](false); startMsg[1]('开始失败' + (e && e.message ? ': ' + e.message : '')) })
                           },
                         }, startBusy[0] ? '开演中…' : ((cards.cards.list || []).length
                           ? '▶ 继续上次演「' + ((cards.cards.list[cards.cards.list.length - 1] || {}).name || '') + '」'
                           : '＋ 开始新角色')),
                         React.createElement('div', { className: 'rp-empty-hint' }, (cards.cards.list || []).length
                           ? '或说「开始/开演」接着演上次的'
-                          : '或说「开始/开演」——我先问你几个问题，带你创建一个角色'))
+                          : '或说「开始/开演」——我先问你几个问题，带你创建一个角色'),
+                        startMsg[0] ? React.createElement('div', { className: 'rp-sb-set-msg' }, startMsg[0]) : null)
                     : React.createElement(React.Fragment, null,
                         React.createElement('button', { className: 'rp-capsule', style: { width: '100%' }, onClick: function () { capOpen[1](!capOpen[0]) } },
                           React.createElement('span', { className: 'rp-capsule-name' }, c.name),

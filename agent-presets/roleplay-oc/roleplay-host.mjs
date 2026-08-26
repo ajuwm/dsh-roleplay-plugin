@@ -2293,7 +2293,8 @@ export function apply(ctx, config) {
             }
           } else {
             const cards = await readCards()
-            card = cards[0] || null
+            // 与 roleplay_start 工具口径一致：恢复「最近保存」的角色卡(最后一张)，而非第一张
+            card = cards[cards.length - 1] || null
           }
           if (!card) {
             // 无任何角色/卡 → 进入开局引导：注入一条用户消息让模型开始分步引导

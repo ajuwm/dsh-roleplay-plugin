@@ -660,6 +660,10 @@ console.log('\nT26 恢复确认');
   await b2.call('roleplay_start', {});
   t = String(await b2.promptText());
   ok(t.includes('续玩'), '跨实例恢复同样注入确认提示');
+  // 侧栏 start: 恢复上次(最近)角色而非第一张卡(git 修 cards[0]→cards[length-1] 后的口径)
+  const b3 = await boot('love', null, '.roleplay', root);
+  const rs = await b3.svc.start({ sessionId: 't-session' });
+  ok(rs && rs.ok === true && rs.name === '甲', '侧栏 start 恢复最近角色(甲), 与工具口径一致');
   rmSync(root, { recursive: true, force: true });
 }
 
