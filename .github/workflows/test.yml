@@ -17,11 +17,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: ''  # 无依赖, 不需要缓存
-      - name: 语法门 (host / bridge)
+      - name: 语法门 (host / bridge / client)
         run: |
           node --check agent-presets/roleplay/roleplay-host.mjs
           node --check agent-presets/roleplay-friend/roleplay-host.mjs
           node --check agent-presets/roleplay-oc/roleplay-host.mjs
           node --check roleplay-client/lib/index.js
+          node --check roleplay-client/lib/client.js
       - name: 核心路径测试 (79 项)
         run: node test/core.test.mjs
