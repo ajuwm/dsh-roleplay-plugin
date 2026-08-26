@@ -90,15 +90,15 @@ console.log('\nT3 亲密度按角色隔离');
 {
   const b = await boot();
   await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
-  await b.call('roleplay_relation', { favor: 10 });
+  await b.call('roleplay_relation', { favor: 8 });
   let st = await b.gs();
-  ok(st.relation && st.relation.favor === 40, '甲 favor 30→40');
+  ok(st.relation && st.relation.favor === 38, '甲 favor 30→38(+8, 单轮限幅)');
   await b.call('roleplay_start', { name: '乙', persona: 'p乙' });
   st = await b.gs();
   ok(st.relation && st.relation.favor === 30, '乙 全新(30), 不继承甲');
   await b.svc.loadCard({ sessionId: 't-session', card: '甲' });
   st = await b.gs();
-  ok(st.relation && st.relation.favor === 40, '切回甲 favor 仍是 40');
+  ok(st.relation && st.relation.favor === 38, '切回甲 favor 仍是 38');
   rmSync(b.root, { recursive: true, force: true });
 }
 
@@ -429,16 +429,88 @@ console.log('\nT20 好感度→阶段→提示词联动');
   await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
   let t = String(await b.promptText());
   ok(t.includes('当前关系：陌生人'), '低好感 → 提示词引导为陌生人');
-  // 好感升到二档(30→50) + 触发里程碑 m1 → 阶段升为「普通认识」(m1 额外+6 好感奖励)
+  // 好感升到二档 + 触发里程碑 m1 → 阶段升为「普通认识」(m1 额外+6 好感奖励; 单轮限幅 ≤8)
   const r = await b.call('roleplay_relation', { favor: 20, milestone: 'm1' });
   ok(r && r.ok === true, '关系评估执行成功');
   const st = await b.gs();
-  ok(st.relation && st.relation.favor === 56, '好感 30+20+6(m1)=56, 女友力因子=1.0');
+  ok(st.relation && st.relation.favor === 44, '好感 30+8(限幅)+6(m1)=44, 女友力因子=1.0');
   ok(st.relationStage === '普通认识', '阶段升为普通认识(里程碑1+好感二档)');
   t = String(await b.promptText());
   ok(t.includes('普通认识'), '提示词【当前关系】跟随阶段变化');
   ok(!t.includes('当前关系：陌生人'), '不再显示陌生人引导');
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T21 好感度增减守护: 限幅/递减/心动锁明示/久别衰减/难度缩放/标尺 ───
+console.log('\nT21 好感度增减守护');
+{
+  // 纯函数: 递减系数 / dimDelta / 久别衰减
+  const rc = await import(new URL('../agent-presets/roleplay/lib/relation-core.mjs', import.meta.url).href);
+  ok(rc.repeatDimOf([{ favor: 4, trust: null, heart: null }, { favor: 2.4, trust: null, heart: null }], 'favor', 1) === 0.3, '递减系数: 连续2次同向 → 第3次 ×0.3');
+  ok(rc.repeatDimOf([{ favor: 4, trust: null, heart: null }], 'favor', 1) === 0.6, '递减系数: 1次同向 → ×0.6');
+  ok(rc.repeatDimOf([{ favor: 4, trust: null, heart: null }, { trust: -2 }], 'favor', -1) === 1, '异向 → 重置 ×1.0');
+  ok(rc.repeatDimOf([{ decay: true }, { favor: 4, trust: null, heart: null }], 'favor', 1) === 1, '久别衰减条目 → 中断计数');
+  const dd = rc.dimDelta({ favor: 4, trust: 4 }, [{ favor: 4, trust: null, heart: null }]);
+  ok(dd.delta.favor === 2.4 && dd.delta.trust === 4 && dd.dims.favor === 0.6 && dd.dims.trust === 1, 'dimDelta: 只对同向轴递减');
+  const now = Date.now();
+  ok(rc.decayLossOf(now - 24 * 3600 * 1000, null, now, 5).loss === 0, '久别: 24h 未过 48h → 不扣');
+  ok(rc.decayLossOf(now - 3 * 86400000, null, now, 5).loss === 1, '久别: 3天 → 信任 -1');
+  ok(rc.decayLossOf(now - 8 * 86400000, null, now, 5).loss === 5, '久别: 8天 → 封顶 -5');
+  ok(rc.decayLossOf(now - 10 * 86400000, now - 3 * 86400000, now, 5).loss === 3, '久别: 有基准(now-3d) → 只补新增天数 -3');
+
+  // 引擎: 单轮限幅 + 心动锁明示(独立实例, 避开 5 分钟评估冷却)
+  const b1 = await boot();
+  await b1.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r1 = await b1.call('roleplay_relation', { favor: 99 });
+  ok(r1 && r1.changed.some((c) => String(c).includes('好感 +8')) && r1.relation.favor === 38, '限幅: 99 → +8 (30+8=38)');
+  rmSync(b1.root, { recursive: true, force: true });
+  const b1x = await boot();
+  await b1x.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const r2 = await b1x.call('roleplay_relation', { heart: 5 });
+  ok(r2 && String(r2.message).includes('解锁') && r2.relation.heart === 10, '心动锁明示: heart 不涨但提示解锁时机');
+  rmSync(b1x.root, { recursive: true, force: true });
+
+  // 引擎: 重复递减跨实例(relRecent 持久化到 progress)
+  const root = mkdtempSync(join(tmpdir(), 'rp-t21-'));
+  mkdirSync(join(root, '.roleplay'), { recursive: true });
+  const b2 = await boot('love', null, '.roleplay', root);
+  await b2.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  let rx = await b2.call('roleplay_relation', { favor: 4 });
+  ok(rx && rx.relation.favor === 34, '递减第1次(跨实例): +4 → 34');
+  const b3 = await boot('love', null, '.roleplay', root);
+  await b3.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  rx = await b3.call('roleplay_relation', { favor: 4 });
+  ok(rx && Math.abs(rx.relation.favor - 36.4) < 1e-9, '递减第2次(跨实例): +2.4 → 36.4');
+  const b4 = await boot('love', null, '.roleplay', root);
+  await b4.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  rx = await b4.call('roleplay_relation', { favor: 4 });
+  ok(rx && Math.abs(rx.relation.favor - 37.6) < 1e-9, '递减第3次(跨实例): +1.2 → 37.6');
+  rmSync(root, { recursive: true, force: true });
+
+  // 引擎: 难度缩放 + 提示词标尺跟随难度
+  const b5 = await boot();
+  await b5.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  let t5 = String(await b5.promptText());
+  ok(t5.includes('加减参照') && t5.includes('正常'), '提示词含标尺(默认难度:正常)');
+  await b5.svc.updateSettings({ sessionId: 't-session', settings: { relPace: 'slow' } });
+  const r5 = await b5.call('roleplay_relation', { favor: 4 });
+  ok(r5 && r5.relation.favor === 32, '慢热: +4 → ×0.5 → +2 (32)');
+  t5 = String(await b5.promptText());
+  ok(t5.includes('加减参照') && t5.includes('慢热'), '提示词标尺跟随难度(慢热)');
+  rmSync(b5.root, { recursive: true, force: true });
+  const b6 = await boot();
+  await b6.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  await b6.svc.updateSettings({ sessionId: 't-session', settings: { relPace: 'fast' } });
+  const r6 = await b6.call('roleplay_relation', { favor: 4 });
+  ok(r6 && r6.relation.favor === 36, '快速: +4 → ×1.5 → +6 (36)');
+  rmSync(b6.root, { recursive: true, force: true });
+
+  // 引擎: 久别自动衰减(seed 主存档 lastSeen 3天前 → 信任 -1)
+  const seed = { enabled: true, character: { name: '甲', persona: 'p甲' }, lastSeen: Date.now() - 3 * 86400000, relation: { favor: 30, trust: 20, heart: 10 }, settings: { relPace: 'normal' }, schema_version: 2 };
+  const b7 = await boot('love', seed);
+  const st7 = await b7.gs();
+  ok(st7.relation && st7.relation.trust === 19, '久别衰减(引擎): 3天 → 信任 -1 (20→19)');
+  rmSync(b7.root, { recursive: true, force: true });
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');

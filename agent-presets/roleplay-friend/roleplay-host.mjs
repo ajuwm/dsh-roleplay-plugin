@@ -10,7 +10,7 @@
 // 路径可配置：数据/桌宠资源基于 DSH 工作区；DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
 import os from 'node:os'
 import path from 'node:path'
-import { applyDelta, reqCheck, relationStageOf, computeStageOf } from './lib/relation-core.mjs?v=15'
+import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dimDelta, decayLossOf } from './lib/relation-core.mjs?v=16'
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
 
 export const name = 'roleplay-host'
@@ -142,7 +142,7 @@ export function apply(ctx, config) {
       // v1 → v2：无字段结构调整（仅补版本标记；后续变更在此累加）
       return parsed
     }
-    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: STYLE !== 'oc', difficulty: 2, relationEnabled: STYLE !== 'oc' }
+    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: STYLE !== 'oc', difficulty: 2, relationEnabled: STYLE !== 'oc', relPace: 'normal' }
     // ── 养成系统：生命体征 + 商城经济 ────────────────────────────────────
     const DEFAULT_STATS = { satiety: 75, health: 85, mood: 70, hp: 100, since: null }
     const DEFAULT_ECONOMY = { coins: 100, lastDaily: null, earnedToday: 0, lastFeedAt: 0, lastFeedDay: null, streak: 0, lastWorkDay: null, dailyGiftDay: null }
@@ -165,6 +165,9 @@ export function apply(ctx, config) {
     // ── 亲密度（好感/信任/心动 各三档） + 男友力 + 里程碑；relationEnabled 开关 ──
     const DEFAULT_RELATION = { favor: 30, trust: 20, heart: 10 }
     const DEFAULT_BOYFRIEND = { reliability: 50, empathy: 50, stability: 50, ambition: 50 }
+    // 亲密度进度难度（玩家自选）：只缩放剧情评估的正负增量，档位阈值/里程碑不变
+    const REL_PACE = { slow: { mul: 0.5, label: '慢热' }, normal: { mul: 1, label: '正常' }, fast: { mul: 1.5, label: '快速' } }
+    function relPaceCfg() { return REL_PACE[(state.settings && state.settings.relPace) || 'normal'] || REL_PACE.normal }
     const TIER_LABELS = { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] }
     const RELATION_KEYS = ['favor', 'trust', 'heart']
     const BF_KEYS = ['reliability', 'empathy', 'stability', 'ambition']
@@ -195,7 +198,7 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], schema_version: SCHEMA_VERSION }
+    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -335,7 +338,23 @@ export function apply(ctx, config) {
     }
     // 应用 AI 关系判断：核心逻辑在 lib/relation-core.mjs（纯函数），此处只做状态落地
     function applyRelation(delta) {
-      const res = applyDelta(state.relation || { ...DEFAULT_RELATION }, state.boyfriend || { ...DEFAULT_BOYFRIEND }, state.milestones || [], delta || {}, {
+      const raw = delta || {}
+      // 引擎限幅(防御)：单轮 |加减| ≤ 8（男友力轴同），模型传超了按 ±8 截断
+      const lim = (v) => Math.max(-8, Math.min(8, Number(v) || 0))
+      const dl = { favor: lim(raw.favor), trust: lim(raw.trust), heart: lim(raw.heart) }
+      if (raw.boyfriend && typeof raw.boyfriend === 'object') {
+        dl.boyfriend = {}
+        for (const k of BF_KEYS) dl.boyfriend[k] = lim(raw.boyfriend[k])
+      }
+      if (raw.milestone !== undefined) dl.milestone = raw.milestone
+      if (raw.note !== undefined) dl.note = raw.note
+      // 重复行为递减（同轴同向连续：第2次 ×0.6、第3+次 ×0.3；跨实例持久化，换方向即重置）
+      const dd = dimDelta(dl, state.relRecent || [])
+      // 进度难度(玩家自选)：只缩放剧情评估增量(慢热×0.5 / 正常×1 / 快速×1.5)，档位阈值/里程碑不变
+      const pace = relPaceCfg()
+      const eff = { ...dd.delta }
+      for (const k of ['favor', 'trust', 'heart']) if (typeof eff[k] === 'number') eff[k] = Math.round(eff[k] * pace.mul * 10) / 10
+      const res = applyDelta(state.relation || { ...DEFAULT_RELATION }, state.boyfriend || { ...DEFAULT_BOYFRIEND }, state.milestones || [], eff, {
         isFriend: isFriendStyle(),
         milestonesDef: MILESTONES,
         tierLabels: TIER_LABELS,
@@ -345,8 +364,35 @@ export function apply(ctx, config) {
       state.relation = res.relation
       state.boyfriend = res.boyfriend
       state.milestones = res.milestones
+      // 记录本次评估增量（重复递减判定窗口；久别衰减条目不入此处）
+      const rec = { t: Date.now() }
+      for (const k of ['favor', 'trust', 'heart']) rec[k] = typeof eff[k] === 'number' ? eff[k] : null
+      if (!Array.isArray(state.relRecent)) state.relRecent = []
+      state.relRecent.push(rec)
+      if (state.relRecent.length > 8) state.relRecent.splice(0, state.relRecent.length - 8)
       if (res.milestoneMsg && res.milestoneMsg.ok) pushStage('env', '里程碑：' + res.milestoneMsg.milestone.name)
-      return { changed: res.changed, milestoneMsg: res.milestoneMsg, stage: relationStage() }
+      return { changed: res.changed, milestoneMsg: res.milestoneMsg, stage: relationStage(), heartLocked: !!res.heartLocked, dims: dd.dims }
+    }
+
+    // 久别衰减（负向保底）：>48h 未互动 → 每满 24h 信任 -1，封顶 -5；玩家回来即停
+    function decayIfAway() {
+      if (!state.enabled || !state.character) return
+      if (!relationEnabled()) return
+      if (!state.lastSeen) return
+      const now = Date.now()
+      const { loss, next } = decayLossOf(state.lastSeen, state.lastDecayAt, now, 5)
+      if (loss > 0) {
+        state.lastDecayAt = next
+        const before = state.relation.trust || 0
+        state.relation.trust = clamp(before - loss, 0, 100)
+        if (state.relation.trust !== before) {
+          pushStage('env', '久别生疏：信任 -' + (before - state.relation.trust))
+          saveState()
+        }
+      } else if (now - state.lastSeen < 48 * 3600 * 1000) {
+        // 玩家回来了：重置衰减基准
+        state.lastDecayAt = null
+      }
     }
 
     const PHYSIOLOGY = '害羞→脸红、低头、声音变小、摆弄衣角；尴尬→脸颊发烫、眼神闪躲；不安→呼吸略急促、手指绞在一起、咬嘴唇；开心→嘴角上扬、眼睛微弯；失落→肩膀下垂、声音低沉、叹气；愧疚→低头、声音越来越小、频繁道歉；孤独→抱紧手臂、缩着肩膀；被触动→眼眶微热、愣住、说不出话；惊讶→眼睛睁大、愣住；防备→后退半步、双臂交叉；感激→眼眶微湿、声音轻柔'
@@ -579,7 +625,7 @@ export function apply(ctx, config) {
     // 按角色隔离的「进度」：亲密度（好感/信任/心动/男友力/里程碑）、养成数值（stats/economy）、
     // 背包、攒钱目标、纪念日、近期记录、日记日期 —— 每个角色一份 progress-<角色名>.json。
     // 切换角色时 persist 旧的、load 新的；character.json 不再存这些字段（只留角色卡与设置）。
-    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'lastDiaryDay']
+    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay']
     function stateForSave() {
       const out = {}
       for (const k of Object.keys(state)) if (!PROGRESS_FIELDS.includes(k)) out[k] = state[k]
@@ -609,6 +655,8 @@ export function apply(ctx, config) {
             state.savingGoal = p.savingGoal || null
             if (Array.isArray(p.anniversaries)) state.anniversaries = p.anniversaries
             if (Array.isArray(p.recentActs)) state.recentActs = p.recentActs
+            if (Array.isArray(p.relRecent)) state.relRecent = p.relRecent.slice(-8)
+            state.lastDecayAt = (typeof p.lastDecayAt === 'number' && Number.isFinite(p.lastDecayAt)) ? p.lastDecayAt : null
             if (p.lastDiaryDay !== undefined) state.lastDiaryDay = p.lastDiaryDay || null
           }
           return
@@ -627,6 +675,8 @@ export function apply(ctx, config) {
         state.anniversaries = []
         state.recentActs = []
         state.lastDiaryDay = null
+        state.relRecent = []
+        state.lastDecayAt = null
       }
       await persistProgress(key)
     }
@@ -699,12 +749,15 @@ export function apply(ctx, config) {
           }
           state.milestones = Array.isArray(state.milestones) ? state.milestones : []
           state.recentActs = Array.isArray(state.recentActs) ? state.recentActs : []
+          state.relRecent = Array.isArray(state.relRecent) ? state.relRecent.slice(-8) : []
+          state.lastDecayAt = (typeof state.lastDecayAt === 'number' && Number.isFinite(state.lastDecayAt)) ? state.lastDecayAt : null
         }
         memory = await loadMemory(charKey())
         await loadProgress(charKey(), true)
         if (Array.isArray(state.roomMembers) && state.roomMembers.length) await refreshRoomSnapshot()
       } catch (e) { console.error('roleplay: load failed', e) }
       stateLoaded = true
+      decayIfAway()
     }
 
     function ensureLoaded() {
@@ -1329,6 +1382,9 @@ export function apply(ctx, config) {
       let msg = []
       if (result.changed.length) msg.push('关系：' + result.changed.join('，'))
       if (result.milestoneMsg) msg.push(result.milestoneMsg.message)
+      if (result.heartLocked) msg.push('（心动还差一点时机：好感与信任都到「亲近/放心」档才解锁，急不来。）')
+      const dimmed = Object.keys(result.dims || {}).filter((k) => (result.dims[k] || 1) < 1)
+      if (dimmed.length) msg.push('（同一行为连续发生，加成已递减。）')
       if (args && args.note) pushStage('action', String(args.note).slice(0, 120))
       const stageLabel = STAGE_LABELS[result.stage] || STAGE_LABELS.stranger
       pushStage('env', '关系：' + stageLabel)
@@ -1829,6 +1885,8 @@ export function apply(ctx, config) {
               const r = state.relation || DEFAULT_RELATION
               const b = state.boyfriend || DEFAULT_BOYFRIEND
               const ms = state.milestones || []
+              const paceLbl = relPaceCfg().label
+              const relAnchor = '【加减参照】当前难度：' + paceLbl + '。按行为定性给分：举手之劳/礼貌寒暄 +0~1；被夸奖/分享日常/一起活动 +1~2；记住喜好/表达理解/关心对方 +2~3；关键时刻陪伴/守约 +3~5；真诚道歉/弥补 +2~3；食言/冷落/发脾气 -2~4；关键时刻不在/背弃承诺 -5~8。单轮|加减|≤8；同向行为连续两次后系统会自动递减，别再给同一行为刷分。' + (isFriendStyle() ? '' : '心动只在关键时刻 +1~3（好感与信任都到「亲近/放心」档才生效）。')
               if (isFriendStyle()) {
                 lines.push(
                   '【关系】好感 ' + Math.round(r.favor) + '（' + tierLabel('favor', r.favor) + '）· 信任 ' + Math.round(r.trust) + '（' + tierLabel('trust', r.trust) + '）',
@@ -1838,6 +1896,7 @@ export function apply(ctx, config) {
                   lines.push('最近他做了：' + state.recentActs.slice(-4).map((a) => a.act).join('；'))
                 }
                 lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；食言/关键时刻不在会真实地掉信任。你们是朋友/同伴关系，不要往恋爱方向带节奏。关系数值是后台记录，不要向玩家汇报数值；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
+                lines.push(relAnchor)
               } else {
                 lines.push(
                   '【关系】好感 ' + Math.round(r.favor) + '（' + tierLabel('favor', r.favor) + '）· 信任 ' + Math.round(r.trust) + '（' + tierLabel('trust', r.trust) + '）· 心动 ' + Math.round(r.heart) + '（' + tierLabel('heart', r.heart) + '）',
@@ -1848,6 +1907,7 @@ export function apply(ctx, config) {
                   lines.push('最近他做了：' + state.recentActs.slice(-4).map((a) => a.act).join('；'))
                 }
                 lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；心动需好感+信任到位才可正增；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任。关系数值是后台记录，不要向玩家汇报数值；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
+                lines.push(relAnchor)
               }
             }
             if (memLines.length) lines.push('记忆（角色记得这些）：\n' + memLines.join('\n'))
@@ -1985,6 +2045,7 @@ export function apply(ctx, config) {
         adoptAgent(args)
         await ensureLoaded()
         hbDiag.getChecks++
+        decayIfAway()
         await maybeFireHeartbeat(new Date())
         const nextLabel = nextHeartbeatLabel()
         const stage = state.enabled && state.character ? relationStage() : 'stranger'
@@ -2007,6 +2068,8 @@ export function apply(ctx, config) {
           milestones: relationEnabled() ? (state.milestones || []) : null,
           relationStage: relationEnabled() ? STAGE_LABELS[relationStage()] : null,
           relationEnabled: relationEnabled(),
+          relPace: (state.settings && state.settings.relPace) || 'normal',
+          relRecent: Array.isArray(state.relRecent) ? state.relRecent.slice(-4) : [],
           roomMembers: Array.isArray(state.roomMembers) ? state.roomMembers.slice() : [],
           stage: stageEvents.slice(0, 12),
           stageLabel: state.enabled && state.character ? STAGE_LABELS[stage] : null,
@@ -2195,6 +2258,7 @@ export function apply(ctx, config) {
         if (typeof s.scriptEnd === 'string') state.settings.scriptEnd = s.scriptEnd
         if (s.statsEnabled !== undefined) state.settings.statsEnabled = !!s.statsEnabled
         if (s.difficulty === 1 || s.difficulty === 2 || s.difficulty === 3) state.settings.difficulty = s.difficulty
+        if (s.relPace === 'slow' || s.relPace === 'normal' || s.relPace === 'fast') state.settings.relPace = s.relPace
         if (s.relationEnabled !== undefined) state.settings.relationEnabled = !!s.relationEnabled
         if (state.character) {
           if (typeof s.persona === 'string' && s.persona.trim()) state.character.persona = s.persona

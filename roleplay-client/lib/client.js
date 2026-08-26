@@ -18,6 +18,16 @@ window.__ModuleLoader__.load({
     var REL_TIER = { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] }
     var BF_DEFS = [['reliability', '靠谱'], ['empathy', '感性'], ['stability', '情绪稳'], ['ambition', '上进']]
     var relTier = function (k, v) { return REL_TIER[k][v <= 33 ? 0 : v <= 66 ? 1 : 2] }
+    var relRecentText = function (last) {
+      if (!last) return ''
+      var bits = []
+      var keys = [['favor', '好感'], ['trust', '信任'], ['heart', '心动']]
+      for (var i = 0; i < keys.length; i++) {
+        var v = last[keys[i][0]]
+        if (typeof v === 'number' && v !== 0) bits.push((v > 0 ? '+' : '') + v + ' ' + keys[i][1])
+      }
+      return bits.join(' · ') || '尚无变化'
+    }
 
     // 商店目录不再在客户端复制：价格单一数据源来自 roleplay-host 的 get-state（shop 字段），
     // 显示与扣款始终一致（历史教训：双端各写一份价格表曾出现显示 40 扣 30 的不一致）。
@@ -540,6 +550,7 @@ window.__ModuleLoader__.load({
                 statsEnabled: !!(statsEn && statsEn.checked),
                 difficulty: Number(g('rp-diff')) || 2,
                 relationEnabled: !!(document.getElementById('rp-relen') && document.getElementById('rp-relen').checked),
+                relPace: g('rp-relpace') || 'normal',
                 persona: g('rp-persona'),
                 scene: g('rp-scene'),
                 mode: g('rp-mode'),
@@ -620,8 +631,15 @@ window.__ModuleLoader__.load({
                                 React.createElement('span', { className: 'rp-stat-name' }, d[1]),
                                 React.createElement('div', { className: 'rp-stat-track' },
                                   React.createElement('div', { className: 'rp-stat-fill ' + d[2], style: { width: Math.max(0, Math.min(100, st.relation[d[0]] || 0)) + '%' } })),
-                                React.createElement('span', { className: 'rp-stat-tier' }, relTier(d[0], st.relation[d[0]] || 0)))
+                                React.createElement('span', { className: 'rp-stat-tier' }, relTier(d[0], st.relation[d[0]] || 0)),
+                                React.createElement('span', { className: 'rp-stat-val' }, String(Math.round(st.relation[d[0]] || 0)))
                             }),
+                            (st.relRecent && st.relRecent.length ? React.createElement('div', { className: 'rp-sb-row' },
+                              React.createElement('span', { className: 'rp-sb-k' }, '最近变化'),
+                              React.createElement('span', null, relRecentText(st.relRecent[st.relRecent.length - 1])),
+                              React.createElement('span', { style: { flex: 1 } }),
+                              React.createElement('span', { className: 'rp-fold-coins' }, ({ slow: '慢热', normal: '正常', fast: '快速' }[st.relPace] || '正常')))
+                      ) : React.createElement('span', null, '')),
                             BF_DEFS.map(function (b) {
                               return React.createElement('div', { className: 'rp-stat-row', key: b[0] },
                                 React.createElement('span', { className: 'rp-stat-name' }, b[1]),
@@ -866,7 +884,14 @@ window.__ModuleLoader__.load({
                         '心跳时允许角色主动看桌面'),
                       React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-relen' },
                         React.createElement('input', { id: 'rp-relen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.relationEnabled === false) }),
-                        '亲密度系统')
+                        '亲密度系统'),
+                      React.createElement('div', { className: 'rp-sb-set-row' },
+                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-relpace' }, '亲密度进度'),
+                        React.createElement('select', { id: 'rp-relpace', className: 'rp-sb-set-input', defaultValue: (st && st.settings && st.settings.relPace) || 'normal' },
+                          React.createElement('option', { value: 'slow' }, '慢热（涨得慢，细水长流）'),
+                          React.createElement('option', { value: 'normal' }, '正常'),
+                          React.createElement('option', { value: 'fast' }, '快速（进展飞快）'))
+                      )
                     ) : null,
                     React.createElement('button', { className: 'rp-sb-set-save', onClick: saveSettings }, '保存设置'),
                     saveMsg[0] ? React.createElement('div', { className: 'rp-sb-set-msg' }, saveMsg[0]) : null
