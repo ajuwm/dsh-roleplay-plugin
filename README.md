@@ -1,5 +1,7 @@
 # 角色扮演插件（DeepSeek Harness）
 
+![tests](https://github.com/ajuwm/dsh-roleplay-plugin/actions/workflows/test.yml/badge.svg)
+
 一个以**沉浸式角色扮演为主体**的 DSH（DeepSeek Harness）插件。角色不只是聊天机器人——她会过日子：按时段生活、记得你多久没来、有没来得及说出口的念头、记得你们的重要日子。**桌面悬浮宠物窗口是其中一个可选附加功能。**
 
 > 需要 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web 版（DSH 0.1.1+，官方 DeepSeek 适配器原生支持图片，无需额外视觉插件）。
