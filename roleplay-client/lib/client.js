@@ -500,7 +500,7 @@ window.__ModuleLoader__.load({
           var shopOpen = React.useState(false)
           var packOpen = React.useState(false)
           var feedOpen = React.useState(false)
-          var moreOpen = React.useState(false)
+          var moreOpen = React.useState(true)
           var capOpen = React.useState(false)
           var memOpen = React.useState(false)
           var diaryOpen = React.useState(false)
@@ -945,91 +945,9 @@ window.__ModuleLoader__.load({
             }
           )
         })
-        // ── DSH「插件设置」→「插件配置」：角色扮演卡片（settings.plugin.item, key=roleplay）──
-        // 直连 roleplay 命名空间（/roleplay settings-read / settings-write），不依赖会话；
-        // roleplay-host 经 settings/updated 事件与侧栏双通道同步。
-        slots.inject('settings.plugin.item', function () {
-          return slots.register(
-            { name: 'settings.plugin.item', key: 'roleplay' },
-            function (props) {
-              var st = React.useState(null)
-              var s = st[0]
-              var setS = st[1]
-              var msg = React.useState(null)
-              var setMsg = msg[1]
-              var failed = React.useState(false)
-              var setFailed = failed[1]
-              var load = function () {
-                setFailed(false)
-                rpc('settings-read', {})
-                  .then(function (r) { if (r && r.ok) { setS(r.value) } else { setFailed(true) } })
-                  .catch(function () { setFailed(true) })
-              }
-              React.useEffect(function () { load() }, [])
-              if (!s) return React.createElement('div', { className: 'rp-card', style: { gap: 8 } },
-                React.createElement('div', { className: 'rp-card-load' }, failed[0] ? '无法读取角色扮演设置（服务未就绪）。' : '角色扮演设置：读档中…'),
-                failed[0] ? React.createElement('button', { className: 'rp-card-save', onClick: load }, '重试') : null
-              )
-              var setOne = function (f, v) {
-                var n = {}
-                n[f] = v
-                setS(Object.assign({}, s, n))
-              }
-              var save = function () {
-                rpc('settings-write', { settings: s })
-                  .then(function (r) {
-                    setMsg(r && r.ok ? '已保存 ✓' : ((r && r.error && r.error.message) || '保存失败'))
-                    if (r && r.ok && r.value) setS(r.value)
-                  })
-                  .catch(function () { setMsg('保存失败') })
-                window.setTimeout(function () { setMsg(null) }, 4000)
-              }
-              var resetDefault = function () {
-                var def = { heartbeatMinutes: 30, narrationMode: 'novel', difficulty: 2, statsEnabled: true, relationEnabled: true, autoLook: false, shotMaxW: 0 }
-                rpc('settings-write', { settings: def })
-                  .then(function (r) {
-                    setMsg(r && r.ok ? '已恢复默认 ✓' : ((r && r.error && r.error.message) || '恢复失败'))
-                    if (r && r.ok && r.value) setS(r.value)
-                  })
-                  .catch(function () { setMsg('恢复失败') })
-                window.setTimeout(function () { setMsg(null) }, 4000)
-              }
-              return React.createElement('div', { className: 'rp-card' },
-                React.createElement('label', { className: 'rp-card-lab', htmlFor: 'rpc-hb' }, '心跳间隔'),
-                React.createElement('select', { id: 'rpc-hb', className: 'rp-card-select', value: String(s.heartbeatMinutes || 30), onChange: function (e) { setOne('heartbeatMinutes', Number(e.target.value)) } },
-                  [10, 30, 60, 120, 240].map(function (m) {
-                    return React.createElement('option', { key: m, value: String(m) }, m + ' 分钟')
-                  })),
-                React.createElement('label', { className: 'rp-card-lab', htmlFor: 'rpc-narr' }, '叙述风格'),
-                React.createElement('select', { id: 'rpc-narr', className: 'rp-card-select', value: s.narrationMode || 'novel', onChange: function (e) { setOne('narrationMode', e.target.value) } },
-                  [['novel', '小说模式'], ['script', '剧本模式'], ['compact', '精简模式']].map(function (m) {
-                    return React.createElement('option', { key: m[0], value: m[0] }, m[1])
-                  })),
-                React.createElement('div', { className: 'rp-card-hint' }, 'novel=小说 / script=剧本 / compact=精简（侧栏有下拉，更直观）'),
-                React.createElement('label', { className: 'rp-card-lab', htmlFor: 'rpc-diff' }, '养成难度'),
-                React.createElement('select', { id: 'rpc-diff', className: 'rp-card-select', value: String(s.difficulty || 2), onChange: function (e) { setOne('difficulty', Number(e.target.value)) } },
-                  [['1', '休闲'], ['2', '标准'], ['3', '困难']].map(function (m) {
-                    return React.createElement('option', { key: m[0], value: m[0] }, m[1])
-                  })),
-                React.createElement('label', { className: 'rp-card-chk' },
-                  React.createElement('input', { type: 'checkbox', checked: !(s.statsEnabled === false), onChange: function (e) { setOne('statsEnabled', e.target.checked) } }),
-                  '属性系统（生命/健康/饱食/心情）'),
-                React.createElement('label', { className: 'rp-card-chk' },
-                  React.createElement('input', { type: 'checkbox', checked: !(s.relationEnabled === false), onChange: function (e) { setOne('relationEnabled', e.target.checked) } }),
-                  '亲密度系统'),
-                React.createElement('label', { className: 'rp-card-chk' },
-                  React.createElement('input', { type: 'checkbox', checked: !!s.autoLook, onChange: function (e) { setOne('autoLook', e.target.checked) } }),
-                  '心跳时自动看桌面'),
-                React.createElement('label', { className: 'rp-card-lab', htmlFor: 'rpc-shotw' }, '桌面截图最大宽度'),
-                React.createElement('input', { id: 'rpc-shotw', className: 'rp-card-input', type: 'number', value: String(s.shotMaxW || 0), onChange: function (e) { setOne('shotMaxW', Number(e.target.value) || 0) }, placeholder: '0 = 原始分辨率' }),
-                React.createElement('div', { className: 'rp-card-actions' },
-                  React.createElement('button', { className: 'rp-card-reset', onClick: resetDefault }, '恢复默认'),
-                  React.createElement('button', { className: 'rp-card-save', onClick: save }, '保存')),
-                msg[0] ? React.createElement('div', { className: 'rp-card-msg' }, msg[0]) : null
-              )
-            }
-          )
-        })
+        // ── DSH「插件设置」面板卡片已移除（2026-08-27）──
+        // rc.2 中 settings 服务波次靠后且该卡片依赖废弃的命名空间通道，长期"无法读取"。
+        // 全部设置已集中在侧栏「设置」区（无需开演角色即可编辑，直接写引擎，不依赖面板服务）。
 
       },
     }
