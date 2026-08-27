@@ -734,6 +734,22 @@ console.log('\nT30 设置跨会话持久');
   rmSync(root, { recursive: true, force: true });
 }
 
+// ─── T31 结束扮演=元指令(不得角色身份拒绝) ─────────────────────
+console.log('\nT31 结束扮演元指令');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲 倔强' });
+  const t = String(await b.promptText());
+  ok(t.includes('元指令') && t.includes('roleplay_stop') && t.includes('不可以用角色身份拒绝'), '结束扮演=元指令(拒绝/挽留被禁)');
+  const r = await b.call('roleplay_stop', {});
+  ok(r && r.ok === true, 'roleplay_stop 成功');
+  const st = await b.gs();
+  ok(st.enabled === false, 'stop 生效(enabled=false)');
+  const t2 = String(await b.promptText());
+  ok(t2.includes('角色扮演已结束') && t2.includes('普通 AI 助手'), '停止后提示词切换到助手态');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
