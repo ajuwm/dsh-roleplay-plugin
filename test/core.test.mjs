@@ -679,6 +679,40 @@ console.log('\nT27 沉浸指令/酒馆排版 预期核对');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T29 人格档案(底线+真实感,隐身) ─────────────────────────
+console.log('\nT29 人格档案');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲 温柔' });
+  let t = String(await b.promptText());
+  ok(t.includes('【人格档案核查】'), '无档案: 开演核查提示(缺失不强制)');
+  const w = await b.call('roleplay_line', { action: 'write', content: '## 底线\n- 雷区：她被比较时会难受\n\n## 真实感\n- 她骂人是关心' });
+  ok(w && w.ok === true, 'write 成功');
+  const pf = readFileSync(join(b.root, b.dataRoot, 'line-甲.md'), 'utf8');
+  ok(pf.includes('无条件服从义务') && pf.includes('不伤害玩家') && pf.includes('亲密边界'), '引擎兜底通用层(身份/不伤害/亲密边界)');
+  ok(pf.includes('雷区') && pf.includes('骂人是关心'), '个性化层+真实感节');
+  t = String(await b.promptText());
+  ok(t.includes('【她的底线】') && t.includes('不伤害玩家') && t.includes('【真实感】'), '注入底线+真实感');
+  ok(t.includes('不得提及'), '隐身条款注入(禁止提及底线/文件)');
+  ok(!t.includes('【人格档案核查】'), '核查提示消失');
+  const st = await b.gs();
+  ok(st.line === undefined, 'getState 不泄露');
+  const a = await b.call('roleplay_line', { action: 'add', content: '他上次答应的事没做到——现在我只信一半' });
+  ok(a && a.ok === true, 'add 成功');
+  t = String(await b.promptText());
+  ok(t.includes('现在我只信一半'), 'add 后底线条目注入更新');
+  const rm = await b.call('roleplay_line', { action: 'remove', content: '雷区：她被比较时会难受' });
+  ok(rm && rm.ok === true, 'remove 成功');
+  const pf2 = readFileSync(join(b.root, b.dataRoot, 'line-甲.md'), 'utf8');
+  ok(!pf2.includes('她被比较时会难受'), 'remove 生效(文件)');
+  ok(t.includes('did I bend my line'), '思考三问注入');
+  // 按角色隔离
+  await b.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  const t2 = String(await b.promptText());
+  ok(!t2.includes('现在我只信一半') && !t2.includes('【她的底线】') && t2.includes('【人格档案核查】'), '按角色隔离(乙无档案,自己有核查)');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

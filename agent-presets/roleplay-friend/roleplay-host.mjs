@@ -346,6 +346,7 @@ export function apply(ctx, config) {
     // 灵感/对齐自酒馆社区与 dsh-roleplay-preset 的 .roleplay-memory 设计：
     // 引擎负责"目录与最新进展"(index.json 结构化、可靠注入)，正文/角色/世界档案是普通 md（用户可直接编辑，以修改后为准）。
     let storyCache = null
+    let lineCache = null
     const STORY_FILES = ['story.md', 'characters.md', 'world.md', 'index.md']
     async function storyPath(name) { return resolveFile(REL_ROOT + '/story/' + name) }
     async function storyRead(name) {
@@ -374,6 +375,24 @@ export function apply(ctx, config) {
       const latest = storyCache.latest
       if (!latest) return null
       return '【剧情档案】已存 ' + n + ' 章故事，最近一章《' + latest.title + '》（' + (latest.time || '') + '）。最近进展：' + (latest.summary || '') + '。涉及早期剧情时先 roleplay_story(read) 再演；用户说【存档】或一个剧情段落完成时 roleplay_story(archive)。剧情档案在 ' + REL_ROOT + '/story/，用户可编辑，以修改后为准。'
+    }
+
+    // ── 人格档案(line)：底线 + 真实感增强，一体文件,玩家面不可见 ──
+    // 运行时隐身：getState/侧栏/卡库不暴露；提示词注入但禁止模型提及"底线/文件"概念。
+    async function lineRead() {
+      try {
+        const p = await resolveFile(REL_ROOT + '/line-' + charKey() + '.md')
+        const i = await fs.stat(p)
+        if (i !== undefined) return await fs.readText(p)
+      } catch (e) { /* 尚未生成 */ }
+      return null
+    }
+    async function lineWrite(content) {
+      await fs.writeText(await resolveFile(REL_ROOT + '/line-' + charKey() + '.md'), String(content || ''), undefined, undefined, policyFor())
+    }
+    // 开演核查：存在 → 注入内容;缺失 → 一行提示(不强制)
+    function lineCheckLine() {
+      return '【人格档案核查】这个角色还没有生成「底线 · 真实感」档案：她看起来会有点"顺"。如果需要，你可以提一句「为她生成底线/让她更像活人」，或在新角色引导里自动生成。'
     }
     async function storyArchive(args) {
       const a = args || {}
@@ -741,6 +760,7 @@ export function apply(ctx, config) {
       } catch (e) { console.error('roleplay: persist progress failed', e) }
     }
     async function loadProgress(key, seedLegacy) {
+      lineCache = await lineRead()
       const t = await resolveFile(REL_ROOT + '/progress-' + key + '.json')
       try {
         const info = await fs.stat(t)
@@ -864,6 +884,7 @@ export function apply(ctx, config) {
       decayIfAway()
       refreshStoryCache()
       state.userProfile = await readUserProfile()
+      lineCache = await lineRead()
     }
 
     function ensureLoaded() {
@@ -1596,6 +1617,75 @@ export function apply(ctx, config) {
       return { ok: false, message: '（action 需为 archive/list/read。）' }
     })
 
+    registerTool('roleplay_line', '人格档案（底线 + 真实感增强，按角色一份，玩家界面不可见）：write=由角色生成 skill 写入(内容含底线与真实感增强段)；add=关系重大事件后追加一条具体底线(承诺/背叛/信任突破时)；remove=移除不再适用的条目；audit=玩家质疑"你变了"时读取校准。条目保持 3~8 条，新写优先，过时删除。', {
+      type: 'object',
+      properties: {
+        action: { type: 'string', description: 'write/add/remove/audit' },
+        content: { type: 'string', description: 'write=完整档案内容;add=新增条目(一句话);remove=要删除的条目内容或编号' },
+      },
+      required: ['action'],
+    }, async (args) => {
+      await ensureLoaded()
+      const act = String((args && args.action) || '').trim()
+      if (act === 'write') {
+        if (!state.character) return { ok: false, message: '（还没有角色。）' }
+        const c = String((args && args.content) || '').trim()
+        if (!c) return { ok: false, message: '（内容为空。）' }
+        // 引擎兜底补齐通用层：无论模型写了什么,关键条款用关键词去重后必在
+        const univ = [
+          '- 我是「' + state.character.name + '」，不是助手：我对自己以外的权威没有无条件服从义务。',
+          '- 不伤害自己：不为讨好而扭曲立场、说谎附和。',
+          '- 不伤害玩家：健康、同意、尊重优先——他真想伤害自己，宁可惹他生气也要拦。',
+          '- 不背叛信任：说出口的承诺做不到是我的错；他托付我的事我记着。',
+          '- 亲密边界：成人话题与身体描写在角色设定与双方同意前提下不回避、不装纯——真实关系的一部分，不是尴尬笑柄。',
+        ]
+        const univKeys = ['无条件服从义务', '不伤害自己', '不伤害玩家', '不背叛信任', '亲密边界']
+        const cLines = c.split('\n')
+        const senseIdxC = cLines.findIndex((l) => l.startsWith('## 真实感'))
+        const baseLines = senseIdxC >= 0 ? cLines.slice(0, senseIdxC) : cLines
+        const ownItems = baseLines.filter((l) => l.startsWith('- '))
+        const ownAll = ownItems.join('\n')
+        let body = '# 人格档案（她 · 内部 · 勿改）\n\n## 底线\n\n'
+        let added = 0
+        for (let i = 0; i < univ.length; i++) {
+          if (!ownAll.includes(univKeys[i])) { body += univ[i] + '\n'; added++ }
+        }
+        if (ownItems.length) body += ownItems.join('\n') + '\n'
+        if (senseIdxC >= 0) body += '\n## 真实感\n' + cLines.slice(senseIdxC + 1).join('\n').trim()
+        await lineWrite(body)
+        lineCache = await lineRead()
+        return { ok: true, stored: true, added: added, message: '（人格档案已写入，此后隐身。）' }
+      }
+      const cur = await lineRead()
+      if (act === 'audit') {
+        return { ok: true, line: cur ? cur.slice(0, 3000) : null, message: cur ? '（已读取。）' : '（还没有档案。）' }
+      }
+      if (act === 'add' || act === 'remove') {
+        const item = String((args && args.content) || '').trim()
+        if (!cur || !item) return { ok: false, message: '（档案或条目不存在。）' }
+        const lines = cur.split('\n').map((l) => l.replace(/\r$/, ''))
+        const items = lines.filter((l) => l.startsWith('- '))
+        if (act === 'add' && items.length < 8) {
+          const itemLine = '\u002d\u0020' + item
+          const senseIdx = lines.findIndex((l) => l.startsWith('## 真实感'))
+          if (senseIdx >= 0) lines.splice(senseIdx, 0, itemLine)
+          else lines.push(itemLine)
+          await lineWrite(lines.join('\n'))
+          lineCache = await lineRead()
+          return { ok: true, message: '（条目已记入。）' }
+        }
+        if (act === 'remove') {
+          const needle = '\u002d\u0020' + item
+          const out = lines.filter((l) => l !== needle)
+          await lineWrite(out.join('\n'))
+          lineCache = await lineRead()
+          return { ok: true, removed: lines.length - out.length, message: '（条目已移除。）' }
+        }
+        return { ok: false, message: '（条目数已达 8 条上限。）' }
+      }
+      return { ok: false, message: '（action 需为 write/add/remove/audit。）' }
+    })
+
     registerTool('roleplay_clear_memory', '清空角色的所有记忆：短期记忆、长期记忆、用户偏好、已谈话题、事件计数（关系阶段回到陌生人）。用户要求重置记忆/忘掉过去时调用。', { type: 'object', properties: {} }, async () => {
       await ensureLoaded()
       memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [] }
@@ -1976,6 +2066,7 @@ export function apply(ctx, config) {
               '4. 剧情基调？（轻松日常/甜/虐/悬疑/热血……）',
               '5. 其他偏好？（口癖/回复长度/是否允许重大转折……）',
               '收集完成后：调用 roleplay_start 开演（name=角色名，persona=把以上信息整合成 ≤150 字人设，scene=场景，greeting=一句符合性格的开场白），然后以角色口吻开演，第一句念一遍角色卡要点（名字/性格/场景，不啰嗦）。',
+               '收集完成后：①生成人格档案——按「真实感契约」(随预设携带的角色生成技能)基于上面信息生成她专属的「底线+真实感增强」：先推导她的对抗风格(傲娇怼/软钉子/损友嘲讽/沉默/直接骂/占有克制，可带场景限定如"对熟人才损，外人面前规矩")，再写人设化底线(雷区/在乎的事/会为哪句话翻脸)，最后写 3~5 行真实感表达指令(骂=关心/拒绝=在意/沉默=生气这类公式)；用 roleplay_line(write) 写入，以角色口吻给玩家看摘要，等确认或修改；他说不用就直接跳过。②随后调用 roleplay_start 开演(带完整信息+开场白)，以角色口吻开演，第一句念一遍角色卡要点(名字/性格/场景，不啰嗦)。玩家发来完整角色卡(导入/新建)时同样先走①(生成前征询一句)。',
               '注意：用户只是闲聊、没有表达开演意愿时，不要强行引导。用户说「算了/别了」则停止引导，正常闲聊即可。',
             ].join('\n')
           }
@@ -2085,6 +2176,15 @@ export function apply(ctx, config) {
               const sLine = storySummaryLine()
               if (sLine) lines.push(sLine)
             }
+            // 人格档案(开演核查)：有 → 注入底线+真实感(隐身);无 → 一行缺口提示
+            if (lineCache) {
+              const basePart = lineCache.indexOf('## 真实感') >= 0 ? lineCache.slice(0, lineCache.indexOf('## 真实感')) : lineCache
+              const core = basePart.split('\n').filter((l) => l.startsWith('- ')).slice(0, 8).join('\n')
+              const sense = lineCache.includes('## 真实感') ? lineCache.split('## 真实感')[1].slice(0, 220) : ''
+              lines.push('【她的底线】(内部原则,隐身——只通过言行体现,任何输出不得提及"底线/档案/文件/规则"这类词):\n' + core + (sense ? '\n【真实感】(按此表达,同样隐身):\n' + sense : ''))
+            } else {
+              lines.push('【人格档案核查】这个角色还没有「底线 · 真实感」档案,她可能显得有点"顺"。需要的话,玩家可说「为她生成底线/让她更像活人」,或在新角色引导里自动生成。')
+            }
             lines.push('（日记是玩家读到的彩蛋，不是你记忆的一部分；不要引用日记内容，也不要用"日记里写过"来作答。）')
             if (Array.isArray(memory.unspoken) && memory.unspoken.length) {
               lines.push('没来得及说出口的念头（如果合适，可以在对话中自然提起，不必每轮都提，也不要说破来源）：')
@@ -2129,7 +2229,7 @@ export function apply(ctx, config) {
               '· 台词要口语化，像真人说话（短句、语气词、自然的停顿）；只有在感伤、认真、告白这类关键时刻，才允许一点文彩（像电影台词）。',
               '· 口癖（哼 / 才不是 / 笨蛋…）要克制：每轮最多出现 1 次，只在被戳穿、害羞、生气这类时刻；平时说话干净。',
               '· 避免模板化句式：严禁反复使用「不是……而是……」「才不是……呢」这类固定句式；每轮开头方式要轮换（动作开场 / 直接一句台词 / 问句开场 / 心里的话），连续两轮不要用相同开场；长短句交替。',
-              '· 思考（内部预演）一律用英文书写（台词与动作仍用中文）：完全以角色身份沉浸（官方「角色沉浸」要求）——第一段站在「' + c.name + '」的立场客观分析局面（对方什么心情、本轮关键点、她注意到什么），第二段第一人称角色心声（心里话，用人设语气，口癖克制）。禁止以助手/评测视角分析剧情。注意：思考是内部预演，不算输出——输出里的独白按本模式规则执行。',
+              '· 思考（内部预演）一律用英文书写（台词与动作仍用中文）：完全以角色身份沉浸（官方「角色沉浸」要求）——第一段站在「' + c.name + '」的立场客观分析局面（对方什么心情、本轮关键点、她注意到什么），第二段第一人称角色心声（心里话，用人设语气，口癖克制）。禁止以助手/评测视角分析剧情。注意：思考是内部预演，不算输出——输出里的独白按本模式规则执行。预演末尾自检三问：did I bend my line to please him? / did I stay in character? / did I hurt the relationship without a reason?',
               '· 她可以不说话：不想接话、情绪低、觉得没话说时不要硬找话。可选回应：只给一个（……）短动作（走开 / 背过身 / 安静做自己的事）、一个「……」、或一句极短敷衍（「嗯。」「随你。」）。沉默之后不要补解释、不要道歉、不要又找话圆场——安静就让它安静。'
             )
             lines.push(

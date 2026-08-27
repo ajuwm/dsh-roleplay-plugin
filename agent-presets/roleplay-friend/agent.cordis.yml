@@ -11,6 +11,16 @@
   config:
     maxBytes: 65536
 
+# 角色生成技能(底线/真实感增强)：命中 skills/rp-realness 供模型加载
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    customSkillDirs:
+      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
 - id: roleplay
   name: cordis:group
   group: true
@@ -18,7 +28,7 @@
     roleplay: true
   config:
     - id: roleplay-host
-      name: './roleplay-host.mjs?gen=27'
+      name: './roleplay-host.mjs?gen=28'
       config:
         style: friend
         dataRoot: .roleplay-friend
