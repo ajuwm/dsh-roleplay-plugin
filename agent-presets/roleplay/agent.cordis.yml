@@ -267,7 +267,7 @@
     roleplay: true
   config:
     - id: roleplay-host
-      name: './roleplay-host.mjs?gen=28'
+      name: './roleplay-host.mjs?gen=29'
       config:
         style: love
 

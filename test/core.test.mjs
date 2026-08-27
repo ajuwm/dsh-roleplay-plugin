@@ -713,6 +713,27 @@ console.log('\nT29 人格档案');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T30 设置跨会话持久(多会话防覆盖) ─────────────────────────
+console.log('\nT30 设置跨会话持久');
+{
+  const root = mkdtempSync(join(tmpdir(), 'rp-t30-'));
+  mkdirSync(join(root, '.roleplay'), { recursive: true });
+  const bPre = await boot('love', null, '.roleplay', root);   // 会话A: 先启动(内存默认)
+  await bPre.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const bSave = await boot('love', null, '.roleplay', root);  // 会话B: 后启动
+  await bSave.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  await bSave.svc.updateSettings({ sessionId: 't-session', settings: { heartbeatMinutes: 60 } });
+  let pf = JSON.parse(readFileSync(join(root, '.roleplay', 'character.json'), 'utf8'));
+  ok(pf.settings && pf.settings.heartbeatMinutes === 60, '保存后文件=60');
+  // 会话A(加载早、内存默认)触发一次写盘(remember→saveState)
+  await bPre.call('roleplay_remember', { event: '测试事件', kind: '日常交流' });
+  pf = JSON.parse(readFileSync(join(root, '.roleplay', 'character.json'), 'utf8'));
+  ok(pf.settings && pf.settings.heartbeatMinutes === 60, '先启动会话写盘不覆盖(60 仍在)');
+  const st = await bPre.gs();
+  ok(st.settings && st.settings.heartbeatMinutes === 60, '会话A 读到 60(保守合并生效)');
+  rmSync(root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

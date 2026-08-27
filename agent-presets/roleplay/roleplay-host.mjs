@@ -133,6 +133,13 @@ export function apply(ctx, config) {
         const seen = new Set(state.milestones.map((m) => m.id))
         for (const m of latest.milestones) if (!seen.has(m.id)) state.milestones.push(m)
       }
+      // 设置防覆盖：本会话未显式保存过设置时,磁盘里"非默认"的键不因本会话写盘而回退默认
+      // (多会话同预设会互相全量覆盖 → 用户保存的设置被"默认内存"会话刷掉, 切回即失效)
+      if (latest.settings && typeof latest.settings === 'object' && !settingsDirty) {
+        for (const k of Object.keys(latest.settings)) {
+          if (state.settings[k] === DEFAULT_SETTINGS[k] && latest.settings[k] !== DEFAULT_SETTINGS[k]) state.settings[k] = latest.settings[k]
+        }
+      }
     }
 
     // 存档 schema 版本：结构变更时 +1 并在 migrateLegacy 补迁移，防旧存档静默失效
@@ -216,6 +223,7 @@ export function apply(ctx, config) {
     let lastStartWasResume = false
     // 工具防滥用（防打卡/防连发）：关系评估与看桌面的「同轮一次 + 最小间隔」状态
     let lastRelationTurn = 0
+    let settingsDirty = false
     let lastRelationCallAt = 0
     let lastLookTurn = 0
     let memory = {
@@ -2560,7 +2568,10 @@ export function apply(ctx, config) {
           if (typeof s.greeting === 'string') state.character.greeting = s.greeting
           if (s.mode !== undefined && MODE_LABELS[s.mode]) state.character.mode = s.mode
         }
+        // 显式保存：本次写盘 settings 全量生效(不被保守合并拦住), 保存后复位
+        settingsDirty = true
         await saveState()
+        settingsDirty = false
         mirrorSettingsToNamespace()   // 侧栏改动同步回 DSH 设置命名空间（双通道）
         return {
           ok: true,
