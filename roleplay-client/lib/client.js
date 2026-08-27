@@ -38,8 +38,7 @@ window.__ModuleLoader__.load({
       inject: ['slots'],
       apply: function (ctx) {
         var slots = ctx.slots
-        // DSH 0.1.1-rc.2 起不再有 connection 服务：改用同源 fetch 直连
-        // 宿主桥接挂载的 /roleplay/<endpoint> 前缀（自有协议：POST JSON → {ok,value,error}）
+        // rc.2 兼容层：DSH 0.1.1 起无 connection 服务 → 同源 fetch 直连宿主 /roleplay/<endpoint> 前缀
         var rpc = function (ep, payload) {
           return fetch('/roleplay/' + ep, {
             method: 'POST',
@@ -497,7 +496,6 @@ window.__ModuleLoader__.load({
           var look = useLookDesktop(sessionId)
           var cardSel = React.useState('')
           var startBusy = React.useState(false)
-          var startMsg = React.useState(null)
           var saveMsg = React.useState(null)
           var shopOpen = React.useState(false)
           var packOpen = React.useState(false)
@@ -562,9 +560,6 @@ window.__ModuleLoader__.load({
                 difficulty: Number(g('rp-diff')) || 2,
                 relationEnabled: !!(document.getElementById('rp-relen') && document.getElementById('rp-relen').checked),
                 relPace: g('rp-relpace') || 'normal',
-                storyEnabled: !!(document.getElementById('rp-storyen') && document.getElementById('rp-storyen').checked),
-                summaryEnabled: !!(document.getElementById('rp-summen') && document.getElementById('rp-summen').checked),
-                userProfileEnabled: !!(document.getElementById('rp-uppen') && document.getElementById('rp-uppen').checked),
                 persona: g('rp-persona'),
                 scene: g('rp-scene'),
                 mode: g('rp-mode'),
@@ -573,20 +568,6 @@ window.__ModuleLoader__.load({
             })).then(function (result) {
               var v = result && result.ok && result.value ? result.value : null
               saveMsg[1](v && v.ok ? '已保存 ✓' : '保存失败')
-              window.setTimeout(function () { saveMsg[1](null) }, 2500)
-              if (sth.refresh) sth.refresh()
-            }).catch(function () { saveMsg[1]('保存失败') })
-          }
-          var saveProfile = function () {
-            var g = function (id) { var el = document.getElementById(id); return el ? el.value : '' }
-            rpc('user-profile-update', Object.assign(sessionId ? { sessionId: sessionId } : {}, {
-              profile: {
-                nickname: g('rp-upnick'), identity: g('rp-upid'), appearance: g('rp-upapp'),
-                background: g('rp-upbg'), speechStyle: g('rp-upsp'),
-              },
-            })).then(function (result) {
-              var v = result && result.ok && result.value ? result.value : null
-              saveMsg[1](v && v.ok ? '档案已保存 ✓' : '保存失败')
               window.setTimeout(function () { saveMsg[1](null) }, 2500)
               if (sth.refresh) sth.refresh()
             }).catch(function () { saveMsg[1]('保存失败') })
@@ -617,26 +598,15 @@ window.__ModuleLoader__.load({
                             startBusy[1](true)
                             rpc('start', sessionId ? { sessionId: sessionId } : {})
                               .then(function (result) {
-                                var v = result && result.ok && result.value ? result.value : null
-                                if (v && v.ok === false) { startMsg[1](v.message || '开始失败') }
-                                else if (v && v.name) { startMsg[1]('已开演「' + v.name + '」') }
-                                else if (v && v.onboarding) { startMsg[1]('（进入开局引导：让 TA 问你想演谁吧）') }
-                                else if (result && result.error) { startMsg[1](result.error.message || '开始失败') }
                                 window.setTimeout(function () {
                                   startBusy[1](false)
                                   if (sth.refresh) sth.refresh()
                                 }, 1200)
-                                window.setTimeout(function () { startMsg[1](null) }, 3500)
                               })
-                              .catch(function (e) { startBusy[1](false); startMsg[1]('开始失败' + (e && e.message ? ': ' + e.message : '')) })
+                              .catch(function () { startBusy[1](false) })
                           },
-                        }, startBusy[0] ? '开演中…' : ((cards.cards.list || []).length
-                          ? '▶ 继续上次演「' + ((cards.cards.list[cards.cards.list.length - 1] || {}).name || '') + '」'
-                          : '＋ 开始新角色')),
-                        React.createElement('div', { className: 'rp-empty-hint' }, (cards.cards.list || []).length
-                          ? '或说「开始/开演」接着演上次的'
-                          : '或说「开始/开演」——我先问你几个问题，带你创建一个角色'),
-                        startMsg[0] ? React.createElement('div', { className: 'rp-sb-set-msg' }, startMsg[0]) : null)
+                        }, startBusy[0] ? '开演中…' : '▶ 开始扮演'),
+                        React.createElement('div', { className: 'rp-empty-hint' }, '或在对话框里说「开始扮演……」'))
                     : React.createElement(React.Fragment, null,
                         React.createElement('button', { className: 'rp-capsule', style: { width: '100%' }, onClick: function () { capOpen[1](!capOpen[0]) } },
                           React.createElement('span', { className: 'rp-capsule-name' }, c.name),
@@ -930,38 +900,7 @@ window.__ModuleLoader__.load({
                           React.createElement('option', { value: 'slow' }, '慢热（涨得慢，细水长流）'),
                           React.createElement('option', { value: 'normal' }, '正常'),
                           React.createElement('option', { value: 'fast' }, '快速（进展飞快）'))
-                      ),
-                      React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-storyen' },
-                        React.createElement('input', { id: 'rp-storyen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.storyEnabled === false) }),
-                        '剧情档案（章节式故事库）'),
-                      React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-summen' },
-                        React.createElement('input', { id: 'rp-summen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.summaryEnabled === false) }),
-                        '剧情概况（浓缩摘要防遗忘）'),
-                      React.createElement('label', { className: 'rp-sb-set-check', htmlFor: 'rp-uppen' },
-                        React.createElement('input', { id: 'rp-uppen', type: 'checkbox', defaultChecked: !(st && st.settings && st.settings.userProfileEnabled === false) }),
-                        '用户档案（角色对你的认知）'),
-                      React.createElement('div', { className: 'rp-sb-set-label', style: { margin: '6px 0 2px' } }, '我的档案'),
-                      React.createElement('div', { className: 'rp-sb-set-row' },
-                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upnick' }, '称呼'),
-                        React.createElement('input', { id: 'rp-upnick', className: 'rp-sb-set-input', defaultValue: (st && st.userProfile && st.userProfile.nickname) || '', placeholder: '她怎么叫你' })
-                      ),
-                      React.createElement('div', { className: 'rp-sb-set-row' },
-                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upid' }, '身份'),
-                        React.createElement('input', { id: 'rp-upid', className: 'rp-sb-set-input', defaultValue: (st && st.userProfile && st.userProfile.identity) || '', placeholder: '学生/社畜/旅人…' })
-                      ),
-                      React.createElement('div', { className: 'rp-sb-set-row' },
-                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upapp' }, '外貌'),
-                        React.createElement('input', { id: 'rp-upapp', className: 'rp-sb-set-input', defaultValue: (st && st.userProfile && st.userProfile.appearance) || '', placeholder: '一两句话，她眼里记住的样子' })
-                      ),
-                      React.createElement('div', { className: 'rp-sb-set-row', style: { alignItems: 'flex-start' } },
-                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upbg', style: { paddingTop: 4 } }, '背景'),
-                        React.createElement('textarea', { id: 'rp-upbg', className: 'rp-sb-set-textarea', defaultValue: (st && st.userProfile && st.userProfile.background) || '', placeholder: '她该知道的你（擅长/经历/秘密…）' })
-                      ),
-                      React.createElement('div', { className: 'rp-sb-set-row', style: { alignItems: 'flex-start' } },
-                        React.createElement('label', { className: 'rp-sb-set-label', htmlFor: 'rp-upsp', style: { paddingTop: 4 } }, '说话方式'),
-                        React.createElement('textarea', { id: 'rp-upsp', className: 'rp-sb-set-textarea', defaultValue: (st && st.userProfile && st.userProfile.speechStyle) || '', placeholder: '你怎么说话：简短/毒舌/爱开玩笑…' })
-                      ),
-                      React.createElement('button', { className: 'rp-sb-set-save', onClick: saveProfile }, '保存我的档案')
+                      )
                     ) : null,
                     React.createElement('button', { className: 'rp-sb-set-save', onClick: saveSettings }, '保存设置'),
                     saveMsg[0] ? React.createElement('div', { className: 'rp-sb-set-msg' }, saveMsg[0]) : null
