@@ -675,7 +675,7 @@ console.log('\nT27 沉浸指令/酒馆排版 预期核对');
   const t = String(await b.promptText());
   ok(t.includes('完全以角色身份沉浸'), '沉浸指令: 完全以角色身份沉浸(官方要求融合)');
   ok(t.includes('第一段') && t.includes('角色心声'), '两段式结构保留(第一段角色立场/第二段心声)');
-  ok(t.includes('排版约定') && t.includes('台词用中文引号') && t.includes('动作、神态用「……」'), '酒馆排版约定注入(novel)');
+  ok(t.includes('排版约定') === false, '酒馆排版约定已去除(输出格式回归原约定)');
   rmSync(b.root, { recursive: true, force: true });
 }
 
