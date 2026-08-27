@@ -35,10 +35,20 @@ window.__ModuleLoader__.load({
 
     var plugin = {
       name: 'roleplay-client',
-      inject: ['slots', 'connection'],
+      inject: ['slots'],
       apply: function (ctx) {
         var slots = ctx.slots
-        var connection = ctx.connection
+        // DSH 0.1.1-rc.2 起不再有 connection 服务：改用同源 fetch 直连
+        // 宿主桥接挂载的 /roleplay/<endpoint> 前缀（自有协议：POST JSON → {ok,value,error}）
+        var rpc = function (ep, payload) {
+          return fetch('/roleplay/' + ep, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload || {}),
+          }).then(function (r) {
+            return r.json().catch(function () { return { ok: false, error: { message: 'HTTP ' + r.status } } })
+          })
+        }
 
         // ── 样式（随插件卸载移除） ──────────────────────────────────────────
         var style = document.createElement('style')
@@ -321,7 +331,7 @@ window.__ModuleLoader__.load({
           var setSt = state[1]
           var alive = true
           var refresh = function () {
-            connection.rpc.call('/roleplay', 'get-state', sessionId ? { sessionId: sessionId } : {})
+            rpc('get-state', sessionId ? { sessionId: sessionId } : {})
               .then(function (result) { if (alive && result.ok) setSt(result.value) })
               .catch(function () {})
           }
@@ -341,14 +351,14 @@ window.__ModuleLoader__.load({
           var setSt = state[1]
           var payload = function () { return sessionId ? { sessionId: sessionId } : {} }
           var refresh = function () {
-            connection.rpc.call('/roleplay', 'pet-status', payload())
+            rpc('pet-status', payload())
               .then(function (result) { if (result && result.ok) setSt(result.value) })
               .catch(function () {})
           }
           React.useEffect(function () {
             var alive = true
             var tick = function () {
-              connection.rpc.call('/roleplay', 'pet-status', payload())
+              rpc('pet-status', payload())
                 .then(function (result) { if (alive && result && result.ok) setSt(result.value) })
                 .catch(function () {})
             }
@@ -358,7 +368,7 @@ window.__ModuleLoader__.load({
           }, [])
           var act = function (ep) {
             return function () {
-              connection.rpc.call('/roleplay', ep, payload())
+              rpc(ep, payload())
                 .then(function (result) { if (result && result.ok) setSt(result.value) })
                 .catch(function () {})
               window.setTimeout(refresh, 1200)
@@ -374,7 +384,7 @@ window.__ModuleLoader__.load({
           var setCards = state[1]
           var payload = function () { return sessionId ? { sessionId: sessionId } : {} }
           var refresh = function () {
-            connection.rpc.call('/roleplay', 'cards-list', payload())
+            rpc('cards-list', payload())
               .then(function (result) { if (result && result.ok && result.value && result.value.cards) setCards({ list: result.value.cards, loaded: true }) })
               .catch(function () {})
           }
@@ -384,12 +394,12 @@ window.__ModuleLoader__.load({
             return function () { window.clearInterval(id) }
           }, [])
           var load = function (card) {
-            connection.rpc.call('/roleplay', 'cards-load', Object.assign(payload(), { card: card }))
+            rpc('cards-load', Object.assign(payload(), { card: card }))
               .then(function () { window.setTimeout(refresh, 800) })
               .catch(function () {})
           }
           var del = function (card) {
-            connection.rpc.call('/roleplay', 'cards-delete', Object.assign(payload(), { card: card }))
+            rpc('cards-delete', Object.assign(payload(), { card: card }))
               .then(function () { window.setTimeout(refresh, 800) })
               .catch(function () {})
           }
@@ -403,7 +413,7 @@ window.__ModuleLoader__.load({
           var setMsg = state[1]
           var look = function () {
             setMsg('截图并注入中…')
-            connection.rpc.call('/roleplay', 'look-desktop', sessionId ? { sessionId: sessionId } : {})
+            rpc('look-desktop', sessionId ? { sessionId: sessionId } : {})
               .then(function (result) {
                 var v = result && result.ok && result.value ? result.value : null
                 if (v && v.ok) setMsg(v.message || '已发送。')
@@ -499,7 +509,7 @@ window.__ModuleLoader__.load({
           var econMsg = React.useState(null)
           var econAct = function (ep) {
             return function (id) {
-              connection.rpc.call('/roleplay', ep, Object.assign(sessionId ? { sessionId: sessionId } : {}, { item: id }))
+              rpc(ep, Object.assign(sessionId ? { sessionId: sessionId } : {}, { item: id }))
                 .then(function (result) {
                   var v = result && result.ok && result.value ? result.value : null
                   econMsg[1](v && v.ok ? v.message : ((v && v.message) || '操作失败'))
@@ -517,7 +527,7 @@ window.__ModuleLoader__.load({
             var chosen = (cards.cards.list || []).filter(function (x) { return x.id === roomSel[0] })[0]
             var second = chosen ? chosen.name : null
             if (!first || !second || first === second) { econMsg[1]('先选一张与当前角色不同的卡'); window.setTimeout(function () { econMsg[1](null) }, 2600); return }
-            connection.rpc.call('/roleplay', 'room-start', Object.assign(sessionId ? { sessionId: sessionId } : {}, { characters: [first, second] }))
+            rpc('room-start', Object.assign(sessionId ? { sessionId: sessionId } : {}, { characters: [first, second] }))
               .then(function (result) {
                 var v = result && result.ok && result.value ? result.value : null
                 econMsg[1](v && v.ok ? v.message : ((v && v.message) || '开房间失败'))
@@ -527,7 +537,7 @@ window.__ModuleLoader__.load({
               .catch(function (e) { econMsg[1]('开房间失败: ' + String(e && e.message ? e.message : e)); window.setTimeout(function () { econMsg[1](null) }, 4000) })
           }
           var roomStop = function () {
-            connection.rpc.call('/roleplay', 'room-stop', sessionId ? { sessionId: sessionId } : {})
+            rpc('room-stop', sessionId ? { sessionId: sessionId } : {})
               .then(function (result) {
                 var v = result && result.ok && result.value ? result.value : null
                 econMsg[1](v && v.ok ? v.message : '关房间失败')
@@ -540,7 +550,7 @@ window.__ModuleLoader__.load({
             var g = function (id) { var el = document.getElementById(id); return el ? el.value : '' }
             var auto = document.getElementById('rp-autolook')
             var statsEn = document.getElementById('rp-statsen')
-            connection.rpc.call('/roleplay', 'settings-update', Object.assign(sessionId ? { sessionId: sessionId } : {}, {
+            rpc('settings-update', Object.assign(sessionId ? { sessionId: sessionId } : {}, {
               settings: {
                 heartbeatMinutes: Number(g('rp-hb')) || 30,
                 shotMaxW: Number(g('rp-shotw')) || 0,
@@ -569,7 +579,7 @@ window.__ModuleLoader__.load({
           }
           var saveProfile = function () {
             var g = function (id) { var el = document.getElementById(id); return el ? el.value : '' }
-            connection.rpc.call('/roleplay', 'user-profile-update', Object.assign(sessionId ? { sessionId: sessionId } : {}, {
+            rpc('user-profile-update', Object.assign(sessionId ? { sessionId: sessionId } : {}, {
               profile: {
                 nickname: g('rp-upnick'), identity: g('rp-upid'), appearance: g('rp-upapp'),
                 background: g('rp-upbg'), speechStyle: g('rp-upsp'),
@@ -605,7 +615,7 @@ window.__ModuleLoader__.load({
                           onClick: function () {
                             if (startBusy[0]) return
                             startBusy[1](true)
-                            connection.rpc.call('/roleplay', 'start', sessionId ? { sessionId: sessionId } : {})
+                            rpc('start', sessionId ? { sessionId: sessionId } : {})
                               .then(function (result) {
                                 var v = result && result.ok && result.value ? result.value : null
                                 if (v && v.ok === false) { startMsg[1](v.message || '开始失败') }
@@ -959,7 +969,7 @@ window.__ModuleLoader__.load({
                   c ? React.createElement('button', {
                     className: 'rp-sb-stop',
                     onClick: function () {
-                      connection.rpc.call('/roleplay', 'stop', sessionId ? { sessionId: sessionId } : {})
+                      rpc('stop', sessionId ? { sessionId: sessionId } : {})
                         .catch(function () {})
                       setSbOpen(false)
                     },
@@ -1012,7 +1022,7 @@ window.__ModuleLoader__.load({
               var setFailed = failed[1]
               var load = function () {
                 setFailed(false)
-                connection.rpc.call('/roleplay', 'settings-read', {})
+                rpc('settings-read', {})
                   .then(function (r) { if (r && r.ok) { setS(r.value) } else { setFailed(true) } })
                   .catch(function () { setFailed(true) })
               }
@@ -1027,7 +1037,7 @@ window.__ModuleLoader__.load({
                 setS(Object.assign({}, s, n))
               }
               var save = function () {
-                connection.rpc.call('/roleplay', 'settings-write', { settings: s })
+                rpc('settings-write', { settings: s })
                   .then(function (r) {
                     setMsg(r && r.ok ? '已保存 ✓' : ((r && r.error && r.error.message) || '保存失败'))
                     if (r && r.ok && r.value) setS(r.value)
@@ -1037,7 +1047,7 @@ window.__ModuleLoader__.load({
               }
               var resetDefault = function () {
                 var def = { heartbeatMinutes: 30, narrationMode: 'novel', difficulty: 2, statsEnabled: true, relationEnabled: true, autoLook: false, shotMaxW: 0 }
-                connection.rpc.call('/roleplay', 'settings-write', { settings: def })
+                rpc('settings-write', { settings: def })
                   .then(function (r) {
                     setMsg(r && r.ok ? '已恢复默认 ✓' : ((r && r.error && r.error.message) || '恢复失败'))
                     if (r && r.ok && r.value) setS(r.value)

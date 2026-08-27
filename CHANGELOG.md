@@ -2,6 +2,12 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.2.10] - DSH 0.1.1-rc.2 桥接适配(修复 /roleplay 全 405)
+- 根因：DSH 0.1.1-rc.2 起 `connection` 服务不再提供（插件 RPC 改为 Typert/生成描述符 Remote），旧 `connection.rpc.handle` 通道未挂载 → 浏览器所有 `/roleplay/*` POST 落到前端静态兜底返回 405
+- 修复：桥接改为 rc2 自身内部同款原语——`ctx.webServer.register({kind:'prefix', path:'/roleplay', handler})` 挂载自有前缀，浏览器端同源 `fetch` 直连（自有协议：POST JSON → {ok,value,error}）；loopback-only + 非 POST 拒绝
+- 兼容：rc.5（DSH Desktop）与 rc.2（npm exec）双版本均可工作；诊断日志保留（webServer 缺失时打印）
+- 注意：用 `npm exec @deepseek-ai/dsh web` 启动时工作区=终端当前目录（如 C:\Program Files\nodejs），数据/桌宠路径会错位——请从 `D:\dsh` 启动或使用 DSH Desktop
+
 ## [1.2.9] - 诊断：/roleplay 405（DSH 0.1.1-rc.2 适配排查）
 - 症状：升级 DSH 后浏览器侧栏所有 RPC（start/get-state 等）返回 HTTP 405（前端静态兜底 = `/roleplay` 通道未挂载）
 - 本版：桥接 apply 时打印精确诊断（connection 存在性、rpc.handle 可用性、注册异常信息），不再静默降级——重启后依据 `[roleplay-client]` 日志定位并跟进修复
