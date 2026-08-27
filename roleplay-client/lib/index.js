@@ -47,12 +47,15 @@ function isLoopback(req) {
 
 export default {
   name: 'roleplay-client',
-  // 不声明硬性 inject：全部 ctx.get 可选，缺哪个降级哪个（详见文件头注释）
+  // 关键：必须 inject webServer —— Cordis 按依赖分波激活，无 inject 的行在第一波
+  // apply，此时内建服务(webServer/agents/settings)都还没提供(实测三者全部 MISSING)。
+  // 声明 inject 后本行在 webServer 就绪后才 apply；其余服务保持 ctx.get 可选。
+  inject: ['webServer'],
   apply(ctx) {
     const agents = ctx.get('agents')
     const agentPresets = ctx.get('agentPresets')
     const settingsSvc = ctx.get('settings')
-    const webServer = ctx.get('webServer')
+    const webServer = ctx.webServer
 
     // 注册 DSH「插件设置」命名空间（roleplay），供设置面板渲染；已注册则跳过。
     if (settingsSvc !== undefined) {
