@@ -750,6 +750,17 @@ console.log('\nT31 结束扮演元指令');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T32 时间感知锚 ────────────────────────────────────────
+console.log('\nT32 时间感知锚');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const t = String(await b.promptText());
+  ok(t.includes('【此刻】') && /【此刻】周[一二三四五六日] \d{1,2}月\d{1,2}日 \d{2}:\d{2}/.test(t), '精确时间锚注入(周几/日期/时:分)');
+  ok(t.includes('当前时段：'), '时段行保留');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
 if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

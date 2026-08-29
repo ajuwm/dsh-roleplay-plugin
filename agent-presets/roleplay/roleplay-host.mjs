@@ -377,6 +377,15 @@ export function apply(ctx, config) {
       } catch (e) { return null }
     }
     async function refreshStoryCache() { storyCache = await readStoryIndex() }
+    // 精确时间锚:让角色对"此刻"有强感知(周几/日期/时:分/时段 + 凌晨特判)
+    const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六']
+    function nowCheckLine(now, period) {
+      const pad2 = (n) => String(n).padStart(2, '0')
+      let s = '【此刻】周' + WEEK_CN[now.getDay()] + ' ' + (now.getMonth() + 1) + '月' + now.getDate() + '日 ' + pad2(now.getHours()) + ':' + pad2(now.getMinutes()) + '（' + (period ? period.label : '') + '）。'
+      const h = now.getHours()
+      if (h < 6) s += '（凌晨了：她要么困得迷糊，要么还惦记着你别熬到天亮——语气放轻放慢；如果对话延续到这么晚，她也会顺势把话说到很晚。）'
+      return s
+    }
     function storySummaryLine() {
       if (!storyCache) return null
       const n = storyCache.chapters.length
@@ -2102,6 +2111,7 @@ export function apply(ctx, config) {
               }
               rl.push('当前场景：' + c.scene)
               rl.push('当前时段：' + period.label + ' —— ' + period.desc)
+              rl.push(nowCheckLine(now, period))
               rl.push('【房间规则】',
                 '1. 你同时是上面每个角色，说话前先以【角色名】标注身份（如「【甲】（她低头）……今天天气真好。」）；动作/神态用（……）包在话语前，不要以 AI/旁白口吻总结或替玩家说话。',
                 '2. 玩家点名了谁，就主要回应谁；没点名时，由最近被提到或最有话说的角色先开口，其他角色可以接一两句，但每轮最多 2~3 个角色有台词，不要全员长篇。',
@@ -2128,6 +2138,7 @@ export function apply(ctx, config) {
             const keys = Object.keys(status)
             if (keys.length) lines.push('剧本状态：' + keys.map((k) => k + ': ' + status[k]).join('，'))
             lines.push('当前时段：' + period.label + ' —— ' + period.desc)
+            lines.push(nowCheckLine(now, period))
             if (statsEnabled()) {
               const st = statsStatus()
               lines.push('当前身心状态：' + st.label + ' —— ' + st.desc)
