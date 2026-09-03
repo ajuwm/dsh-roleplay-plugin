@@ -1,4 +1,4 @@
-﻿# DSH 角色扮演插件 · 一键安装/卸载脚本
+# DSH 角色扮演插件 · 一键安装/卸载脚本
 # 用法:
 #   pwsh install.ps1                     # 安装(可选 -Default 设为默认预设, -Workspace <路径> 指定 DSH 工作区)
 #   pwsh install.ps1 -Uninstall          # 卸载(撤销本脚本加的东西; -Presets 一并删除预设目录, -Pet 一并删除桌宠数据)
@@ -17,7 +17,8 @@ $root = $PSScriptRoot
 $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $presetRoot = Join-Path $dshHome '.agent-presets'
 $profileDir = Join-Path $dshHome 'profiles\web'
-$clientDir = Join-Path $profileDir 'node_modules\@dsh-user\roleplay-client'
+$clientDir = Join-Path $profileDir 'node_modules\@ajuwm\dsh-roleplay-plugin'
+$legacyClient = Join-Path $profileDir 'node_modules\@dsh-user\roleplay-client'
 $patchFile = Join-Path $profileDir 'cordis.patch.yml'
 $settingsFile = Join-Path $dshHome 'settings.yaml'
 
@@ -54,18 +55,29 @@ function Install-Pet {
 
 # ── 3. 放置侧栏桥接 + 安全合并 patch ───────────────────────────────────
 function Install-Client {
-  $src = Join-Path $root 'roleplay-client'
-  if (-not (Test-Path $src)) { Write-Step 'skip: 包内无 roleplay-client/'; return }
-  Write-Step '放置侧栏桥接 (roleplay-client)...'
-  New-Item -ItemType Directory -Force -Path (Join-Path $profileDir 'node_modules\@dsh-user') | Out-Null
-  if (Test-Path $clientDir) { Write-Step '  已存在(覆盖为包内版本, 旧文件已备份 .bak)'; Copy-Item $clientDir ($clientDir + '.bak') -Recurse -Force }
-  if (Test-Path $clientDir) { Remove-Item $clientDir -Recurse -Force }
-  Copy-Item $src $clientDir -Recurse -Force
+  if (-not (Test-Path (Join-Path $root 'lib'))) { Write-Step 'skip: 包内无 lib/'; return }
+  # 兼容清理: 旧手动布局(@dsh-user/roleplay-client)一并迁移
+  if (Test-Path $legacyClient) {
+    Copy-Item $legacyClient ($legacyClient + '.bak') -Recurse -Force
+    Remove-Item $legacyClient -Recurse -Force
+    Write-Step '  已清理旧版 @dsh-user/roleplay-client (备份 .bak)'
+    if (Test-Path $patchFile) {
+      $cur = Get-Content $patchFile -Raw
+      $cur = $cur -replace '(?s)\r?\n?- insert:\s*\r?\n\s*- id: roleplay-client\s*\r?\n\s*name: ''@dsh-user/roleplay-client''\s*', ''
+      Set-Content -Path $patchFile -Value ($cur.TrimEnd()) -Encoding UTF8
+      Write-Step '  已移除旧 patch 行'
+    }
+  }
+  Write-Step '放置侧栏桥接 (@ajuwm/dsh-roleplay-plugin)...'
+  New-Item -ItemType Directory -Force -Path $clientDir | Out-Null
+  if (Test-Path (Join-Path $clientDir 'package.json')) { Copy-Item $clientDir ($clientDir + '.bak') -Recurse -Force }
+  Copy-Item (Join-Path $root 'lib') (Join-Path $clientDir 'lib') -Recurse -Force
+  Copy-Item (Join-Path $root 'package.json') (Join-Path $clientDir 'package.json') -Force
   Write-Step '合并 cordis.patch.yml...'
   $block = @'
 - insert:
     - id: roleplay-client
-      name: '@dsh-user/roleplay-client'
+      name: '@ajuwm/dsh-roleplay-plugin'
 '@
   if (-not (Test-Path $patchFile)) {
     Set-Content -Path $patchFile -Value $block -Encoding UTF8
@@ -73,11 +85,10 @@ function Install-Client {
     return
   }
   $cur = Get-Content $patchFile -Raw
-  if ($cur -match 'roleplay-client') { Write-Step '  patch 已包含 roleplay-client, 跳过'; return }
+  if ($cur -match '@ajuwm/dsh-roleplay-plugin') { Write-Step '  patch 已包含新包, 跳过'; return }
   # 备份 + 追加 + 立即回滚检查(确保文件仍可被 DSH 读: 至少是以 - 开头的列表或空)
   Copy-Item $patchFile ($patchFile + '.bak') -Force
   try {
-    # 确保文件以列表形式可解析: 若现有内容不含 - 开头则视为异常, 不改
     if ($cur.Trim() -ne '' -and -not ($cur -match '(?m)^\s*-\s')) {
       throw "现有 $patchFile 不是条目列表, 请手动合并(内容已备份为 .bak)。"
     }
@@ -120,7 +131,7 @@ function Uninstall-All {
   Write-Step '卸载...'
   if ((Test-Path ($patchFile + '.bak')) -and (Test-Path $patchFile)) {
     $cur = Get-Content $patchFile -Raw
-    $cur = $cur -replace '(?s)\r?\n?- insert:\s*\r?\n\s*- id: roleplay-client\s*\r?\n\s*name: ''@dsh-user/roleplay-client''\s*', ''
+    $cur = $cur -replace '(?s)\r?\n?- insert:\s*\r?\n\s*- id: roleplay-client\s*\r?\n\s*name: ''(@dsh-user/roleplay-client|@ajuwm/dsh-roleplay-plugin)''\s*', ''
     $cur = $cur.TrimEnd()
     Set-Content -Path $patchFile -Value $cur -Encoding UTF8
     Write-Step '  patch 行已移除'

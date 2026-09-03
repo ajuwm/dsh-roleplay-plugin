@@ -2,6 +2,14 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.4.5] - 分发迁移:官方 `dsh plugin add`(bundle 化)
+- 仓库根成为 npm 包(`@ajuwm/dsh-roleplay-plugin`):声明 `dsh.bundle.patch` + `dsh.client` → `dsh plugin --profile <p> add github:ajuwm/dsh-roleplay-plugin` 一条命令完成安装/更新/卸载(自动 reconcile 进 `dsh.profile.bundles`)
+- 桥接(host/browser halves)移入包根 `lib/`;浏览器 half 走包 `dsh.client` 声明,不再需要手写 `cordis.patch.yml`
+- **预设自动物化**:桥接 apply 时把包内 `agent-presets/*` 同步到 `%DSH_HOME%\.agent-presets`(带 `.rp-version` 版本标记,升级自动刷新,不删用户额外文件)——插件用户无需手动放置预设
+- `install.ps1` 同步新布局并**兼容清理旧版手动装置**(`@dsh-user/roleplay-client` → 备份+移除+patch 行清理)
+- 安装说明更新:推荐 `dsh plugin add`;install.ps1 作为备选(含桌宠资源放置)
+- 测试:T0 语法门指向新路径;全量 **170/170**
+
 ## [1.4.4] - 强化时间感知
 - 提示词新增【此刻】精确时间锚:周几 + 日期 + 时:分 + 时段(单角色/房间模式均注入)——她开始"知道现在几点",台词会自然带时间细节(都十点了/周一了/快到饭点了)
 - 凌晨特判(0~6 点):语气放轻放慢、"她要么困得迷糊要么惦记你别熬到天亮",长夜对话顺势延展

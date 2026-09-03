@@ -27,8 +27,8 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/relation-core.mjs',
     'agent-presets/roleplay/lib/time-core.mjs',
     'agent-presets/roleplay/deskpet.js',
-    'roleplay-client/lib/index.js',
-    'roleplay-client/lib/client.js',
+    'lib/index.js',
+    'lib/client.js',
   ];
   const root = fileURLToPath(new URL('..', import.meta.url));
   let bad = 0;

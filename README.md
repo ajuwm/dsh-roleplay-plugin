@@ -25,15 +25,31 @@
 
 ## 📦 安装
 
-见 [`docs/INSTALL.md`](docs/INSTALL.md)。**推荐一键脚本**（仓库根 `install.ps1`，支持 `-Default` / `-Uninstall`，安全合并 `cordis.patch.yml`）；或手动：
+**推荐:官方插件命令(需要 pnpm;DSH Desktop 自带,或 `npm i -g pnpm`)**
 
+```powershell
+dsh plugin --profile web add github:ajuwm/dsh-roleplay-plugin
+# 更新/卸载: dsh plugin --profile web update @ajuwm/dsh-roleplay-plugin
+#               dsh plugin --profile web remove @ajuwm/dsh-roleplay-plugin
+```
+
+安装后重启 DSH:角色扮演预设自动物化到 `%DSH_HOME%\.agent-presets\`,侧栏自动挂载。桌宠**程序**随包;桌宠**立绘素材**请自备(放工作区 `pet\`,见下方说明)。
+
+**备选:一键脚本(`install.ps1`)**
+
+```powershell
+pwsh install.ps1            # 安装并兼容清理旧版手动布局
+pwsh install.ps1 -Uninstall # 回滚
+```
+
+**手动(不推荐)**:
 1. 把 `agent-presets/roleplay` 放到 `%USERPROFILE%\.dsh\.agent-presets\roleplay`
-2. 把 `roleplay-client` 放到 `%USERPROFILE%\.dsh\profiles\web\node_modules\@dsh-user\roleplay-client`，并在 `cordis.patch.yml` 追加 `roleplay-client` 行
-3. 把 `pet`（桌宠资源）放到你的 **DSH 工作区**下的 `pet` 目录（默认 `<DSH 工作区>\pet`，可用环境变量 `DSH_PET_DIR` 覆盖；工作区 = DSH 运行/配置的 workspace，不是 `%USERPROFILE%\.dsh`）
+2. 把 `lib` + `package.json` 放到 `%USERPROFILE%\.dsh\profiles\web\node_modules\@ajuwm\dsh-roleplay-plugin`，并在 `cordis.patch.yml` 追加 `roleplay-client` 行(包名 `@ajuwm/dsh-roleplay-plugin`)
+3. 桌宠立绘:放入 **DSH 工作区**下的 `pet` 目录(默认 `<DSH 工作区>\pet`,可用 `DSH_PET_DIR` 覆盖;工作区 ≠ `%USERPROFILE%\.dsh`)
 4. `settings.yaml` 里 `agent-presets.default: roleplay`
-5. 重启 DSH，新建会话，说「开始/开演」或侧栏按钮开始扮演
+5. 重启 DSH,新建会话,说「开始/开演」或侧栏按钮开始扮演
 
-> 角色扮演默认会话预设即用；桌宠是可选的附加，不开启不影响角色扮演。
+> 角色扮演默认会话预设即用;桌宠是可选的附加,不开启不影响角色扮演。
 
 ## 📚 文档
 

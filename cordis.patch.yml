@@ -1,0 +1,9 @@
+# dsh-roleplay-plugin bundle 层。
+# dsh plugin --profile <p> add github:ajuwm/dsh-roleplay-plugin 后:
+#   ①本包进入 profile 依赖; ②对应本包的 dsh.bundle 声明, 自动 reconcile 进
+#     dsh.profile.bundles; ③本补丁向组合树插入插件加载行(host half 经包主入口
+#     解析, browser half 经 dsh.client 解析); ④桥接 apply 时把包内 agent-presets/*
+#     物化到 %DSH_HOME%/.agent-presets(带版本标记, 升级自动刷新)。
+- insert:
+    - id: roleplay-client
+      name: '@ajuwm/dsh-roleplay-plugin'
