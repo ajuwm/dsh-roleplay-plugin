@@ -22,7 +22,7 @@ jobs:
           node --check agent-presets/roleplay/roleplay-host.mjs
           node --check agent-presets/roleplay-friend/roleplay-host.mjs
           node --check agent-presets/roleplay-oc/roleplay-host.mjs
-          node --check roleplay-client/lib/index.js
-          node --check roleplay-client/lib/client.js
-      - name: 核心路径测试 (T0 语法门 + T1~T21)
+          node --check lib/index.js
+          node --check lib/client.js
+      - name: 核心路径测试 (T0 语法门 + T1~T32)
         run: node test/core.test.mjs
