@@ -12,6 +12,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dimDelta, decayLossOf } from './lib/relation-core.mjs?v=16'
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
+import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -2386,6 +2387,51 @@ export function apply(ctx, config) {
           lastTurn: lastTurnAudit,
           hbDiag,
         }
+      },
+      // 对话侧边栏：向角色发一条消息（走真实会话，与主对话区同一会话流）
+      chatSend: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        if (!state.enabled || !state.character) return { ok: false, message: '请先开始角色扮演。' }
+        const agent = liveAgent()
+        if (!agent) return { ok: false, message: '没有找到当前会话。' }
+        const text = String((args && args.text) || '').trim()
+        if (!text) return { ok: false, message: '消息不能为空。' }
+        // 以普通用户消息发送（无 rp-/plugin 标记）：桌面对话与主对话区同流，
+        // 引擎按真实用户互动处理（触摸/金币），侧边栏按普通用户气泡显示。
+        const message = {
+          id: 'chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+          role: 'user',
+          content: [{ type: 'text', text }],
+        }
+        try {
+          agent.send(message, 'next-turn', true)
+          return { ok: true }
+        } catch (e) {
+          return { ok: false, message: String((e && e.message) || e) }
+        }
+      },
+      // 对话侧边栏：增量拉取消息（since = 上次所见最大 seq）
+      chatPoll: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const session = currentSession()
+        if (!session) return { messages: [], lastSeq: 0 }
+        const since = Number(args && args.since) || 0
+        return pickMessages(session.events, since, 200)
+      },
+      // 对话侧边栏：初始历史（最近 limit 条）
+      chatHistory: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const session = currentSession()
+        if (!session) return { messages: [], lastSeq: 0 }
+        const limit = Number(args && args.limit) > 0 ? Number(args.limit) : 60
+        const msgs = historyMessages(session.events, limit)
+        let last = 0
+        const events = session.events
+        if (Array.isArray(events)) for (const ev of events) if (ev && typeof ev.seq === 'number' && ev.seq > last) last = ev.seq
+        return { messages: msgs, lastSeq: last }
       },
       stop: async (args) => {
         adoptAgent(args)

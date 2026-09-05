@@ -26,6 +26,9 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay-oc/roleplay-host.mjs',
     'agent-presets/roleplay/lib/relation-core.mjs',
     'agent-presets/roleplay/lib/time-core.mjs',
+    'agent-presets/roleplay/lib/chat-core.mjs',
+    'agent-presets/roleplay-friend/lib/chat-core.mjs',
+    'agent-presets/roleplay-oc/lib/chat-core.mjs',
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
@@ -51,7 +54,16 @@ async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reu
   if (!reuseRoot) mkdirSync(join(root, dataRoot), { recursive: true });
   if (seedChar) writeFileSync(join(root, dataRoot, 'character.json'), JSON.stringify(seedChar));
   const captured = { tools: {}, svc: null, sections: [], events: {} };
-  const fake = { id: 't-session', session: null };
+  const fake = { id: 't-session', session: { events: [], seq: 0 } };
+  fake.send = function (message) {
+    const ev = {
+      seq: ++fake.session.seq,
+      type: message && message.role === 'user' ? 'user/message' : 'assistant/message',
+      data: { message },
+    };
+    fake.session.events.push(ev);
+    return { id: message && message.id };
+  };
   const fsx = {
     async resolve(rel, opts) { const base = (opts && opts.cwd) || root; return join(base, rel); },
     async readText(p) { return readFileSync(p, 'utf8'); },
@@ -775,6 +787,39 @@ console.log('\nT34 设置面板命名空间契约');
   ok(stxt.includes("register('roleplay', SCHEMA)") || true, '—');
 }
 
-console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');
-if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
+// ─── T35 对话侧边栏: chat-core 纯函数 + 引擎 chatSend/chatPoll/chatHistory ───
+console.log('\nT35 对话侧边栏');
+{
+  const { pickMessages, historyMessages } = await import(new URL('../agent-presets/roleplay/lib/chat-core.mjs', import.meta.url).href);
+  const events = [
+    { seq: 1, type: 'user/message', data: { id: 'real-1', content: [{ type: 'text', text: '你好' }] } },
+    { seq: 2, type: 'assistant/message', data: { message: { id: 'rp-2', content: [{ type: 'text', text: '（心声）在呢。' }], source: { kind: 'plugin' } } } },
+    { seq: 3, type: 'assistant/message', data: { message: { id: 'a-3', content: [{ type: 'text', text: '在呢，你说。' }] } } },
+    { seq: 4, type: 'turn/end' },
+  ];
+  const r1 = pickMessages(events, 0, 200);
+  ok(r1.messages.length === 3 && r1.lastSeq === 4, '增量提取 3 条 + lastSeq=4(含无文本事件)');
+  ok(r1.messages[0].role === 'user' && r1.messages[0].plugin === false, '真实用户消息非插件标记');
+  ok(r1.messages[1].plugin === true && r1.messages[2].plugin === false, 'rp-*/plugin source 即插件标记');
+  const r2 = pickMessages(events, 2, 200);
+  ok(r2.messages.length === 1 && r2.messages[0].seq === 3, 'since=2 只取 seq>2');
+  const r3 = historyMessages(events, 2);
+  ok(r3.length === 2 && r3[0].seq === 2 && r3[1].seq === 3, '历史截断最近 2 条(保持原序)');
+  const r4 = pickMessages(events, 4, 200);
+  ok(r4.messages.length === 0, 'since=lastSeq 无增量');
+  // 引擎集成: 发送 → 会话事件可读(同一会话流)
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const s1 = await b.svc.chatSend({ sessionId: 't-session', text: '在吗' });
+  ok(s1 && s1.ok === true, 'chatSend 成功入会话');
+  const p1 = await b.svc.chatPoll({ sessionId: 't-session', since: 0 });
+  ok(p1 && p1.messages.some((m) => m.role === 'user' && m.text === '在吗' && m.plugin === false), 'chatPoll 读到用户消息(非插件标记)');
+  const h1 = await b.svc.chatHistory({ sessionId: 't-session', limit: 10 });
+  ok(h1 && Array.isArray(h1.messages) && h1.messages.length >= 1, 'chatHistory 返回历史');
+  const s2 = await b.svc.chatSend({ sessionId: 't-session', text: '   ' });
+  ok(s2 && s2.ok === false, '空消息被拒');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
