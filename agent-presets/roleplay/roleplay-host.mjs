@@ -17,6 +17,7 @@ import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/n
 import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
+import { pickSnapshotDir, missingOf } from './lib/backup-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -38,6 +39,10 @@ export function apply(ctx, config) {
     // 注意：此处只用 apply 顶部已就绪的 sandboxPolicy（不能调 workspaceRoot()，它依赖后面才初始化的 selfAgent）。
     const RP_ROOT_DIR = (sandboxPolicy && sandboxPolicy.workspaceRoot) || ''
     const RP_PET_DIR = process.env.DSH_PET_DIR || path.join(RP_ROOT_DIR, 'pet')
+    // 备份根: 与数据根平级、独立于数据根(删 .roleplay 不影响备份); 相对路径供 resolveFile 使用
+    const BACKUP_ROOT = RP_ROOT_DIR ? '.roleplay-backup' : null
+    const BACKUP_ROOT_ABS = RP_ROOT_DIR ? path.join(RP_ROOT_DIR, '.roleplay-backup') : null
+    let backupLastAt = null
 
     // ── DSH 插件设置命名空间「roleplay」双通道同步 ────────────────────────
     // settings 是可选宿主服务（ctx.get 不阻塞挂载）：存在则与 DSH 右侧「插件设置」
@@ -379,7 +384,9 @@ export function apply(ctx, config) {
       return null
     }
     async function storyWrite(name, content) {
+      await backupBeforeWrite(REL_ROOT + '/story/' + name)
       await fs.writeText(await storyPath(name), content, undefined, undefined, policyFor())
+      await snapshotAfterWrite(REL_ROOT + '/story/' + name)
     }
     async function readStoryIndex() {
       try {
@@ -418,7 +425,9 @@ export function apply(ctx, config) {
       return null
     }
     async function lineWrite(content) {
+      await backupBeforeWrite(REL_ROOT + '/line-' + charKey() + '.md')
       await fs.writeText(await resolveFile(REL_ROOT + '/line-' + charKey() + '.md'), String(content || ''), undefined, undefined, policyFor())
+      await snapshotAfterWrite(REL_ROOT + '/line-' + charKey() + '.md')
     }
     // 开演核查：存在 → 注入内容;缺失 → 一行提示(不强制)
     function lineCheckLine() {
@@ -469,7 +478,9 @@ export function apply(ctx, config) {
       } catch (e) { return null }
     }
     async function writeUserProfile(p) {
+      await backupBeforeWrite(REL_ROOT + '/user-profile.json')
       await fs.writeText(await resolveFile(REL_ROOT + '/user-profile.json'), JSON.stringify(p, null, 2), undefined, undefined, policyFor())
+      await snapshotAfterWrite(REL_ROOT + '/user-profile.json')
     }
     function userProfileLines() {
       if (!userProfileEnabled()) return null
@@ -751,7 +762,9 @@ export function apply(ctx, config) {
           worldbook: memory.worldbook || [],
           unspoken: memory.unspoken || [],
         }
+        await backupBeforeWrite(REL_ROOT + '/mem-' + key + '.json')
         await fs.writeText(t, JSON.stringify(perChar, null, 2), undefined, undefined, policyFor())
+        await snapshotAfterWrite(REL_ROOT + '/mem-' + key + '.json')
       } catch (e) { console.error('roleplay: persist memory failed', e) }
     }
     async function loadMemory(key) {
@@ -786,7 +799,9 @@ export function apply(ctx, config) {
         const t = await resolveFile(REL_ROOT + '/progress-' + key + '.json')
         const perChar = {}
         for (const f of PROGRESS_FIELDS) perChar[f] = state[f] ?? null
+        await backupBeforeWrite(REL_ROOT + '/progress-' + key + '.json')
         await fs.writeText(t, JSON.stringify(perChar, null, 2), undefined, undefined, policyFor())
+        await snapshotAfterWrite(REL_ROOT + '/progress-' + key + '.json')
       } catch (e) { console.error('roleplay: persist progress failed', e) }
     }
     async function loadProgress(key, seedLegacy) {
@@ -841,6 +856,84 @@ export function apply(ctx, config) {
     }
 
     function diaryPrefix() { return 'diary-' + charKey() + '-' }
+
+    // ── 数据三层备份: L1 写盘前 .bak / L2 每日快照 / L3 启动恢复 ──────────
+    // 目标: 重要数据(角色卡库/当前状态/记忆/日记/档案)绝不单点。
+    async function backupBeforeWrite(relPath) {
+      if (!fs || !relPath) return
+      try {
+        const t = await resolveFile(relPath)
+        const info = await fs.stat(t)
+        if (info === undefined) return
+        const cur = await fs.readText(t)
+        await fs.writeText(t + '.bak', cur, undefined, undefined, policyFor())
+      } catch (e) { console.error('roleplay: backup-before-write failed (' + relPath + ')', e) }
+    }
+    async function snapshotExists(day) {
+      if (!BACKUP_ROOT) return false
+      try {
+        const info = await fs.stat(await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, day)))
+        return info !== undefined
+      } catch (e) { return false }
+    }
+    // L2: 每日一次把数据根全部文本文件快照到 workspace/.roleplay-backup/<dataRoot>/<date>/
+    async function dailySnapshot(force) {
+      if (!BACKUP_ROOT || !fs) return null
+      const day = dayKey(new Date())
+      if (!force && await snapshotExists(day)) return null
+      try {
+        const srcDir = await resolveFile(REL_ROOT)
+        const files = await fs.listDir(srcDir)
+        const copied = []
+        for (const f of files) {
+          if (!f || String(f).endsWith('.bak') || f === '.rp-version') continue
+          const content = await fs.readText(path.join(srcDir, f))
+          const dst = await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, day, f))
+          await fs.writeText(dst, content, undefined, undefined, policyFor())
+          copied.push(String(f))
+        }
+        backupLastAt = stamp()
+        return { day, count: copied.length }
+      } catch (e) { console.error('roleplay: daily snapshot failed', e); return null }
+    }
+    // L2b: 写盘后把该文件同步进"当天快照"(快照准实时, 同一天内后续写入不丢失)
+    async function snapshotAfterWrite(relPath) {
+      if (!BACKUP_ROOT || !fs || !relPath) return
+      try {
+        const day = dayKey(new Date())
+        const snapDir = await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, day))
+        const snapInfo = await fs.listDir(snapDir)
+        if (!Array.isArray(snapInfo)) return
+        const src = await resolveFile(relPath)
+        const info = await fs.stat(src)
+        if (info === undefined) return
+        const content = await fs.readText(src)
+        const dst = await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, day, path.basename(relPath)))
+        await fs.writeText(dst, content, undefined, undefined, policyFor())
+      } catch (e) { /* 快照同步失败不阻塞主流程 */ }
+    }
+    // L3: 数据根缺失文件 → 从最近快照只补缺失(绝不覆盖现存)
+    async function restoreFromBackup() {
+      if (!BACKUP_ROOT || !fs) return 0
+      try {
+        const snapRoot = await resolveFile(path.join(BACKUP_ROOT, REL_ROOT))
+        const dates = (await fs.listDir(snapRoot)).filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x))).sort()
+        if (!dates.length) return 0
+        const latest = dates[dates.length - 1]
+        const snapFiles = await fs.listDir(await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, latest)))
+        let curFiles = []
+        try { curFiles = await fs.listDir(await resolveFile(REL_ROOT)) } catch (e) { curFiles = [] }
+        const miss = missingOf(snapFiles, curFiles)
+        let n = 0
+        for (const f of miss) {
+          const content = await fs.readText(await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, latest, String(f))))
+          await fs.writeText(await resolveFile(path.join(REL_ROOT, String(f))), content, undefined, undefined, policyFor())
+          n++
+        }
+        if (n > 0) console.error('[roleplay] 已从备份恢复 ' + n + ' 个文件(来源 ' + latest + '): ' + miss.join(', '))
+        return n
+      } catch (e) { return 0 }
+    }
 
     async function loadState() {
       try {
@@ -927,7 +1020,13 @@ export function apply(ctx, config) {
     function ensureLoaded() {
       if (stateLoaded) return Promise.resolve()
       if (!selfAgent) return Promise.resolve()
-      if (!loadPromise) loadPromise = loadState().catch((e) => { console.error('roleplay: load rejected', e) })
+      // L3: 先做一次灾难恢复(数据根缺文件 → 从最近快照只补缺失), 再正常加载
+      if (!loadPromise) {
+        loadPromise = restoreFromBackup()
+          .catch(() => 0)
+          .then(() => loadState())
+          .catch((e) => { console.error('roleplay: load rejected', e) })
+      }
       return loadPromise
     }
 
@@ -951,9 +1050,12 @@ export function apply(ctx, config) {
             if (info !== undefined) mergeAppendState(JSON.parse(await fs.readText(target)))
           } catch (e) { console.error("roleplay: read-merge failed", e) }
           await fs.writeText(target, JSON.stringify(stateForSave(), null, 2), undefined, undefined, policyFor())
+          await snapshotAfterWrite(REL_ROOT + '/character.json')
           await persistMemory(charKey())
           await persistProgress(charKey())
           syncSettingsFromNamespace()   // fire-and-forget：与 DSH 设置命名空间对齐（幂等）
+          // L2: 每日一次快照到独立备份根(写成功后, 不阻塞后续流程; 失败静默)
+          try { await dailySnapshot(false) } catch (e) { /* 快照失败不阻塞主流程 */ }
         } catch (e) { console.error('roleplay: save failed', e) }
       })
     }
@@ -1784,6 +1886,11 @@ export function apply(ctx, config) {
       try {
         const t = await resolveFile(CARDS_FILE)
         let info = await fs.stat(t)
+        if (info === undefined) {
+          // L3: 卡库缺失 → 先从磁盘备份恢复一次
+          await restoreFromBackup()
+          info = await fs.stat(t)
+        }
         if (info === undefined && REL_ROOT !== '.roleplay') {
           // 回退: 读旧版按预设目录的卡库(首次迁移),写盘时自动转全局
           const legacy = await resolveFile(REL_ROOT + '/cards.json')
@@ -1803,7 +1910,9 @@ export function apply(ctx, config) {
     }
     async function writeCards(cards) {
       const t = await resolveFile(CARDS_FILE)
+      await backupBeforeWrite(CARDS_FILE)
       await fs.writeText(t, JSON.stringify(cards, null, 2), undefined, undefined, policyFor())
+      await snapshotAfterWrite(CARDS_FILE)
     }
 
     // 切换/新建角色前自动保存当前角色为卡：保证旧人设永远可切回，不再被覆盖丢失。
@@ -1925,8 +2034,10 @@ export function apply(ctx, config) {
         const target = await resolveFile(REL_ROOT + '/' + diaryPrefix() + key + '.md')
         let existing = ''
         try { const info = await fs.stat(target); if (info !== undefined) existing = await fs.readText(target) } catch (e) {}
+        await backupBeforeWrite(REL_ROOT + '/' + diaryPrefix() + key + '.md')
         const text = String(args.content).trim()
         await fs.writeText(target, (existing ? existing.replace(/\s+$/, '') + '\n\n' : '') + text + '\n', undefined, undefined, policyFor())
+        await snapshotAfterWrite(REL_ROOT + '/' + diaryPrefix() + key + '.md')
         state.lastDiaryDay = key
         await saveState()
         return { ok: true, message: '今日日记已保存（' + key + '）。' }
@@ -2611,6 +2722,7 @@ export function apply(ctx, config) {
           inventory: (state.inventory || []).map((x) => ({ id: x.id, name: x.name, kind: x.kind, qty: x.qty })),
           notes: Array.isArray(state.notes) ? visibleNotes(state.notes) : [],
           game: publicGameState(),
+          backupInfo: { lastAt: backupLastAt, root: BACKUP_ROOT_ABS },
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
           relation: relationEnabled() ? (isFriendStyle() ? { favor: (state.relation || DEFAULT_RELATION).favor, trust: (state.relation || DEFAULT_RELATION).trust } : { ...(state.relation || DEFAULT_RELATION) }) : null,
@@ -2740,6 +2852,13 @@ export function apply(ctx, config) {
         state.game = null
         await saveState()
         return { ok: true }
+      },
+      // 手动立即备份(每日快照,force 允许重复)
+      backupNow: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const r = await dailySnapshot(true)
+        return r ? { ok: true, day: r.day, count: r.count } : { ok: false, message: '备份失败(数据根可能还不存在)。' }
       },
       stop: async (args) => {
         adoptAgent(args)

@@ -1,4 +1,4 @@
-﻿# roleplay note window (WPF) - sticky-note windows pinned to the desktop at any position.
+# roleplay note window (WPF) - sticky-note windows pinned to the desktop at any position.
 # Architecture: polls the DSH bridge /roleplay/notes-list (POST), keeps one frameless
 # paper window per visible note, reports drag positions via /roleplay/notes-ack pos.
 # Usage: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File note-window.ps1 -Port <dsh-port>
@@ -27,6 +27,7 @@ function New-Solid([string]$hex) {
 }
 
 $script:wins = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+$script:noteRefs = New-Object 'System.Collections.Generic.Dictionary[string,object]'
 $script:emptyWin = $null
 
 # ---------- note window ----------
@@ -126,8 +127,13 @@ function New-NoteWin($note) {
     $win.Top = $work.Top + 60 + ($i % 5) * 46
   }
 
-  # drag: report position (throttled)
-  $dragId = [string]$note.id
+  # drag: report position (throttled) / click actions.
+  # 注意: PS 事件处理器在触发时按"脚本级作用域"解析变量——函数局部变量($win/$dragId/$border/$txt)
+  # 在事件触发时已不可见, 会导致交互失效。因此一律经 $this.Tag + $script:noteRefs 字典访问。
+  $id = [string]$note.id
+  $win.Tag = $id
+  $btnRead.Tag = $id
+  $btnDel.Tag = $id
   $win.Add_LocationChanged({
     if (-not $script:locBusy) {
       $script:locBusy = $true
@@ -136,28 +142,39 @@ function New-NoteWin($note) {
       $script:locTimer.Add_Tick({
         $script:locTimer.Stop()
         $script:locBusy = $false
-        $null = Post-Json '/notes-ack' @{ id = $dragId; action = 'pos'; value = @{ x = [int]$script:lastNoteWin.Left; y = [int]$script:lastNoteWin.Top } }
+        $null = Post-Json '/notes-ack' @{ id = $script:lastNoteWin.Tag; action = 'pos'; value = @{ x = [int]$script:lastNoteWin.Left; y = [int]$script:lastNoteWin.Top } }
       })
-      $script:lastNoteWin = $win
+      $script:lastNoteWin = $this
       $script:locTimer.Start()
     }
   })
 
   $btnRead.Add_Click({
-    $null = Post-Json '/notes-ack' @{ id = $dragId; action = 'read' }
-    $border.Background = New-Solid '#1E232B88'
-    $txt.Foreground = New-Solid '#9AA1B0'
+    $rid = $this.Tag
+    $null = Post-Json '/notes-ack' @{ id = $rid; action = 'read' }
+    $ref = $script:noteRefs[$rid]
+    if ($ref) {
+      $ref.border.Background = New-Solid '#1E232B88'
+      $ref.txt.Foreground = New-Solid '#9AA1B0'
+    }
   })
   $btnDel.Add_Click({
-    $null = Post-Json '/notes-ack' @{ id = $dragId; action = 'delete' }
-    $win.Close()
+    $did = $this.Tag
+    $null = Post-Json '/notes-ack' @{ id = $did; action = 'delete' }
+    $ref = $script:noteRefs[$did]
+    if ($ref -and -not $ref.win.IsClosed) { $ref.win.Close() }
   })
 
-  $win.Add_MouseLeftButtonDown({ $win.DragMove() })
+  $win.Add_MouseLeftButtonDown({ $this.DragMove() })
 
-  $win.Add_Closed({ $script:wins.Remove($dragId) })
+  $win.Add_Closed({
+    $cid = $this.Tag
+    $script:wins.Remove($cid)
+    $script:noteRefs.Remove($cid)
+  })
 
-  $script:wins[[string]$note.id] = @{ win = $win; border = $border; txt = $txt; meta = $meta; note = $note; read = [bool]$note.read }
+  $script:wins[$id] = @{ win = $win; border = $border; txt = $txt; meta = $meta; note = $note; read = [bool]$note.read }
+  $script:noteRefs[$id] = @{ win = $win; border = $border; txt = $txt }
   $win.Show()
 }
 
@@ -166,6 +183,7 @@ function Remove-NoteWin([string]$id) {
     $o = $script:wins[$id]
     if (-not $o.win.IsClosed) { $o.win.Close() }
     $script:wins.Remove($id)
+    $script:noteRefs.Remove($id)
   }
 }
 

@@ -41,6 +41,9 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/rel-tier-core.mjs',
     'agent-presets/roleplay-friend/lib/rel-tier-core.mjs',
     'agent-presets/roleplay-oc/lib/rel-tier-core.mjs',
+    'agent-presets/roleplay/lib/backup-core.mjs',
+    'agent-presets/roleplay-friend/lib/backup-core.mjs',
+    'agent-presets/roleplay-oc/lib/backup-core.mjs',
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
@@ -72,6 +75,11 @@ console.log('\nT0b PS 语法门 (pet/*.ps1)');
     try {
       const script = "$b=[System.IO.File]::ReadAllBytes('" + target.replace(/'/g, "''") + "');$hasBom=($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF);if(-not $hasBom){$bom=New-Object byte[] 3;$bom[0]=0xEF;$bom[1]=0xBB;$bom[2]=0xBF;$all=New-Object byte[] ($b.Length+3);[Array]::Copy($bom,0,$all,0,3);[Array]::Copy($b,0,$all,3,$b.Length)}else{$all=$b};$tmp=Join-Path $env:TEMP ('rp-syn-'+[guid]::NewGuid().ToString('N')+'.ps1');[IO.File]::WriteAllBytes($tmp,$all);$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$t,[ref]$e)|Out-Null;Remove-Item $tmp -Force;if($e.Count){Write-Output ('ERR:'+$e[0].Extent.StartLineNumber+':'+$e[0].Message);exit 1}else{exit 0}";
       const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
+      if (r.error && r.error.code === 'ENOENT') {
+        // CI 为 ubuntu 等无 powershell 平台: 跳过(不判失败; 本地 Windows 与 CI windows job 强制执行)
+        console.log('  ⚠ ' + f + ' 跳过(此平台无 powershell.exe)');
+        continue;
+      }
       if (r.status !== 0) {
         psBad++;
         psChecked++;
@@ -87,7 +95,6 @@ console.log('\nT0b PS 语法门 (pet/*.ps1)');
   }
   ok(psBad === 0, psBad === 0 ? 'PS 脚本全部通过(' + psChecked + '/' + psFiles.length + ')' : psBad + ' 个 PS 脚本语法错误');
 }
-
 // 一次全新引擎实例 + 独立临时数据根（reuseRoot 传入时复用同一数据根，用于跨实例断言）
 async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reuseRoot = null) {
   const root = reuseRoot || mkdtempSync(join(tmpdir(), 'rp-test-'));
@@ -1015,6 +1022,44 @@ console.log('\nT39 好感度档位');
   ok(t.includes('【关系档位行为】'), '档位行为段注入提示词');
   ok(t.includes('称呼'), '行为段含称呼规则');
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T40 备份三层: backup-core 纯函数 + 引擎灾难恢复 + 准实时快照 ───
+console.log('\nT40 备份三层');
+{
+  const B = await import(new URL('../agent-presets/roleplay/lib/backup-core.mjs', import.meta.url).href);
+  ok(B.isDateName('2026-09-05') && !B.isDateName('x') && !B.isDateName('2026-9-5'), '日期名判定');
+  const p = B.pickSnapshotDir(['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04'], 3);
+  ok(p.drop.join() === '2026-09-01' && p.keep.length === 3, '保留策略: 只留最近 3 份');
+  ok(B.missingOf(['a.json', 'b.json'], ['a.json']).join() === 'b.json', '恢复清单只补缺失');
+  ok(B.missingOf(['a.json'], ['a.json']).length === 0, '已存在不重复恢复');
+  ok(B.needMirror(['2026-09-03', '2026-09-04'], ['2026-09-03']).join() === '2026-09-04', '镜像增量(只镜像新日期)');
+  ok(B.restoreSourceOf(['2026-09-04', '2026-09-03'], []) === '2026-09-04', '回流取最近镜像(数据根空)');
+  ok(B.restoreSourceOf([], ['a.json']) === null, '有文件不回流');
+  // 引擎集成: 写角色+进度+切角色(写卡库) → 快照准实时 → 删数据根 → 重启恢复
+  const root = mkdtempSync(join(tmpdir(), 'rp-t40-'));
+  mkdirSync(join(root, '.roleplay'), { recursive: true });
+  const b = await boot('love', null, '.roleplay', root);
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  await b.call('roleplay_relation', { favor: 8 });
+  await b.call('roleplay_start', { name: '乙', persona: 'p乙' }); // 自动存甲进卡库(writeCards)
+  const snap = join(root, '.roleplay-backup', '.roleplay');
+  const snapDays = readdirSync(snap);
+  ok(Array.isArray(snapDays) && snapDays.length >= 1, '每日快照目录已生成(独立于数据根)');
+  const snapFiles = readdirSync(join(snap, snapDays[0]));
+  ok(snapFiles.includes('character.json') && snapFiles.includes('progress-甲.json') && snapFiles.includes('cards.json'), '快照含卡库/进度(准实时, 同日写入不丢)');
+  // 模拟灾难: 删整个数据根(备份根独立幸存)
+  rmSync(join(root, '.roleplay'), { recursive: true, force: true });
+  ok(existsSync(snap), '数据根被删后备份仍在');
+  const b2 = await boot('love', null, '.roleplay', root);
+  const st2 = await b2.gs();
+  ok(st2 && st2.character && st2.character.name === '乙', '灾难后自动恢复 character(乙)');
+  await b2.svc.loadCard({ sessionId: 't-session', card: '甲' });
+  const stA = await b2.gs();
+  ok(stA.relation && stA.relation.favor === 38, '恢复 progress(甲 favor=38)');
+  const cards2 = await b2.svc.listCards({ sessionId: 't-session' });
+  ok(cards2 && cards2.cards.some((c) => c.name === '甲'), '卡库从快照恢复(甲)');
+  rmSync(root, { recursive: true, force: true });
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }

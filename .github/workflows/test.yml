@@ -26,3 +26,14 @@ jobs:
           node --check lib/client.js
       - name: 核心路径测试 (T0 语法门 + T1~T32)
         run: node test/core.test.mjs
+
+  ps-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: ''
+      - name: Windows 全量测试 (含 T0b PS 语法门)
+        run: node test/core.test.mjs
