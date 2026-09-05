@@ -16,6 +16,7 @@ import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
 import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
 import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
+import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -2510,6 +2511,18 @@ export function apply(ctx, config) {
           return ''
         },
       })
+      // 关系档位行为: 称呼/语气/主动度随阶段变化(自然流露, 不报数字)
+      systemPrompt.section({
+        name: 'roleplay.tier-behavior',
+        order: 205,
+        text: () => {
+          if (!stateLoaded || !state.enabled || !state.character) return ''
+          if (!relationEnabled()) return ''
+          const stage = relationStage()
+          const heartTier = axisTier((state.relation || DEFAULT_RELATION).heart || 0)
+          return tierBehaviorText(stage, heartTier)
+        },
+      })
     }
 
     // ==================== 心跳引擎 ====================
@@ -2601,6 +2614,15 @@ export function apply(ctx, config) {
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
           relation: relationEnabled() ? (isFriendStyle() ? { favor: (state.relation || DEFAULT_RELATION).favor, trust: (state.relation || DEFAULT_RELATION).trust } : { ...(state.relation || DEFAULT_RELATION) }) : null,
+          tierInfo: relationEnabled() ? {
+            stage: relationStage(),
+            stageName: STAGE_LABELS[relationStage()],
+            stageTier: stageTierOf(relationStage()),
+            axes: RELATION_KEYS.map((k) => {
+              const v = (state.relation || DEFAULT_RELATION)[k] || 0
+              return { key: k, value: v, tier: axisTier(v), progress: progressOf(v), next: nextTierText(v), label: TIER_LABELS[k][axisTier(v) - 1] }
+            }),
+          } : null,
           boyfriend: (relationEnabled() && !isFriendStyle()) ? { ...(state.boyfriend || DEFAULT_BOYFRIEND) } : null,
           milestones: relationEnabled() ? (state.milestones || []) : null,
           relationStage: relationEnabled() ? STAGE_LABELS[relationStage()] : null,

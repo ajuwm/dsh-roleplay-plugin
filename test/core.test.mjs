@@ -38,6 +38,9 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/heartbeat-core.mjs',
     'agent-presets/roleplay-friend/lib/heartbeat-core.mjs',
     'agent-presets/roleplay-oc/lib/heartbeat-core.mjs',
+    'agent-presets/roleplay/lib/rel-tier-core.mjs',
+    'agent-presets/roleplay-friend/lib/rel-tier-core.mjs',
+    'agent-presets/roleplay-oc/lib/rel-tier-core.mjs',
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
@@ -952,6 +955,38 @@ console.log('\nT38 心跳事件池');
   ok(mid.some((x) => ['笑', '点心', '肚子', '外套', '日程', '店'].some((k) => x.includes(k))), '朋友档出现亲近事件');
   const heartOnly = H.pickLifeEvents(22, { stageTier: 0, favorTier: 1, heartTier: 3 }, () => 0.01);
   ok(heartOnly.some((x) => x.includes('心跳') || x.includes('失眠') || x.includes('便签') || x.includes('镜子')), '心动三档出现心动事件(好感门槛不拦心动池)');
+}
+
+// ─── T39 好感度档位: rel-tier-core + 引擎 tierInfo/行为段 ───
+console.log('\nT39 好感度档位');
+{
+  const R = await import(new URL('../agent-presets/roleplay/lib/rel-tier-core.mjs', import.meta.url).href);
+  ok(R.stageTierOf('friend') === 2 && R.stageTierOf('special') === 4 && R.stageTierOf('nope') === 0, 'stageTier 映射');
+  ok(Math.abs(R.progressOf(16) - 16 / 33) < 0.01, 'progressOf 一档内');
+  ok(R.progressOf(50) > 0.5 && R.progressOf(50) < 0.6, 'progressOf 二档内');
+  ok(R.progressOf(80) > 0.4 && R.progressOf(80) < 0.5, 'progressOf 三档内');
+  ok(R.nextTierText(20).includes('13'), '距二档文本(33-20=13)');
+  ok(R.nextTierText(70).includes('顶档'), '顶档无下一档');
+  const b0 = R.tierBehaviorOf('stranger', 1);
+  ok(b0.greeting.includes('您') && b0.tier === 0, '陌生档称呼「您」');
+  const b4 = R.tierBehaviorOf('special', 3);
+  ok(b4.greeting.includes('亲昵') && b4.heartNote.includes('顶档'), '特殊档亲昵+心动顶档提示');
+  const txt = R.tierBehaviorText('friend', 2);
+  ok(txt.includes('【关系档位行为】') && txt.includes('主动'), '行为段文本结构');
+  // 引擎: getState tierInfo + 提示词注入档位段
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  let st = await b.gs();
+  ok(st.tierInfo && st.tierInfo.stageTier === 0 && st.tierInfo.axes.length === 3, 'getState tierInfo(三轴+阶段档)');
+  ok(st.tierInfo.axes[0].progress >= 0 && st.tierInfo.axes[0].progress <= 1, '每轴 progress 归一');
+  await b.call('roleplay_relation', { favor: 8, trust: 6, heart: 0 });
+  st = await b.gs();
+  ok(st.tierInfo.axes[0].value === 38 && st.tierInfo.axes[1].value === 26, '评估后 tierInfo 同步(38/26)');
+  const tierSec = b.captured.sections.find((s) => s.name === 'roleplay.tier-behavior');
+  const t = tierSec ? String(tierSec.text()) : '';
+  ok(t.includes('【关系档位行为】'), '档位行为段注入提示词');
+  ok(t.includes('称呼'), '行为段含称呼规则');
+  rmSync(b.root, { recursive: true, force: true });
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
