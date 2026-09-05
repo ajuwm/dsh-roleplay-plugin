@@ -17,14 +17,17 @@ module.exports = {
     const PET_DIR = process.env.DSH_PET_DIR || path.join(wr, 'pet')
     const IMAGE = PET_DIR + '\\lihui.png'
     const SCRIPT = PET_DIR + '\\pet-window.ps1'
+    const NOTE_SCRIPT = PET_DIR + '\\note-window.ps1'
     const CONFIG_FILE = PET_DIR + '\\config.json'
     const PORT = (webServer && typeof webServer.port === 'number') ? webServer.port : 3080
 
     let targetSessionId = null
     let petProc = null
+    let noteProc = null
     let pending = null
     let seq = 0
     let petEnabled = true
+    let noteEnabled = true
     let owner = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
     const routeDisposers = []
 
@@ -182,11 +185,18 @@ module.exports = {
         const raw = await fs.readText(target)
         const cfg = JSON.parse(raw)
         const enabled = cfg && typeof cfg.enabled === 'boolean' ? cfg.enabled : true
+        const notes = cfg && typeof cfg.noteEnabled === 'boolean' ? cfg.noteEnabled : true
         petEnabled = enabled
+        noteEnabled = notes
         if (petEnabled && !petProc) {
           startPet().catch((e) => console.error('[deskpet] config start', e))
         } else if (!petEnabled && petProc) {
           stopPet()
+        }
+        if (noteEnabled && !noteProc) {
+          startNotes().catch((e) => console.error('[deskpet] config notes start', e))
+        } else if (!noteEnabled && noteProc) {
+          stopNotes()
         }
       } catch (e) { console.error("[deskpet] config unreadable", e) }
     }
@@ -231,6 +241,38 @@ module.exports = {
       if (petProc) {
         try { petProc.terminate() } catch (e) {}
         petProc = null
+      }
+    }
+
+    // 便签纸条窗(独立进程, 与桌宠同技术栈): 启动/停止由 config.noteEnabled 驱动
+    async function startNotes() {
+      if (noteProc) return
+      let exe = 'powershell.exe'
+      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) {}
+      const proc = subprocess.spawn({
+        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', NOTE_SCRIPT, '-Port', String(PORT)],
+        cwd: PET_DIR,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { collect: { maxBytes: 8192 } },
+          stderr: { collect: { maxBytes: 8192 } },
+        },
+        graceMs: 3000,
+      })
+      noteProc = proc
+      proc.done.then((outcome) => {
+        console.log('[deskpet] note window exited', JSON.stringify(outcome))
+        if (noteProc === proc) noteProc = null
+      }).catch((e) => {
+        console.error('[deskpet] note window spawn failed', e)
+        if (noteProc === proc) noteProc = null
+      })
+    }
+
+    function stopNotes() {
+      if (noteProc) {
+        try { noteProc.terminate() } catch (e) {}
+        noteProc = null
       }
     }
 
@@ -357,6 +399,7 @@ module.exports = {
 
     ctx.on('dispose', () => {
       stopPet()
+      stopNotes()
       for (const d of routeDisposers.splice(0)) { try { d() } catch (e) {} }
     })
   },

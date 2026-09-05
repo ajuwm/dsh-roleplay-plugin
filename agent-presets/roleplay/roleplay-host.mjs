@@ -13,6 +13,7 @@ import path from 'node:path'
 import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dimDelta, decayLossOf } from './lib/relation-core.mjs?v=16'
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
 import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
+import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -138,6 +139,10 @@ export function apply(ctx, config) {
         const seen = new Set(state.milestones.map((m) => m.id))
         for (const m of latest.milestones) if (!seen.has(m.id)) state.milestones.push(m)
       }
+      // 便签: 按 id 并集合并(删除墓碑优先, 其余以磁盘为准——跨实例防丢/防复活)
+      if (Array.isArray(latest.notes) && Array.isArray(state.notes)) {
+        state.notes = mergeNotes(state.notes, latest.notes)
+      }
       // 设置防覆盖：本会话未显式保存过设置时,磁盘里"非默认"的键不因本会话写盘而回退默认
       // (多会话同预设会互相全量覆盖 → 用户保存的设置被"默认内存"会话刷掉, 切回即失效)
       if (latest.settings && typeof latest.settings === 'object' && !settingsDirty) {
@@ -214,7 +219,7 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, schema_version: SCHEMA_VERSION }
+    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, notes: [], schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -767,7 +772,7 @@ export function apply(ctx, config) {
     // 按角色隔离的「进度」：亲密度（好感/信任/心动/男友力/里程碑）、养成数值（stats/economy）、
     // 背包、攒钱目标、纪念日、近期记录、日记日期 —— 每个角色一份 progress-<角色名>.json。
     // 切换角色时 persist 旧的、load 新的；character.json 不再存这些字段（只留角色卡与设置）。
-    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay', 'storySummary']
+    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay', 'storySummary', 'notes']
     function stateForSave() {
       const out = {}
       for (const k of Object.keys(state)) if (!PROGRESS_FIELDS.includes(k)) out[k] = state[k]
@@ -799,6 +804,7 @@ export function apply(ctx, config) {
             if (Array.isArray(p.anniversaries)) state.anniversaries = p.anniversaries
             if (Array.isArray(p.recentActs)) state.recentActs = p.recentActs
             if (Array.isArray(p.relRecent)) state.relRecent = p.relRecent.slice(-8)
+            if (Array.isArray(p.notes)) state.notes = p.notes.filter((n) => n && n.id)
             state.lastDecayAt = (typeof p.lastDecayAt === 'number' && Number.isFinite(p.lastDecayAt)) ? p.lastDecayAt : null
             if (typeof p.storySummary === 'string') state.storySummary = p.storySummary.slice(0, 500) || null
             if (p.lastDiaryDay !== undefined) state.lastDiaryDay = p.lastDiaryDay || null
@@ -822,6 +828,7 @@ export function apply(ctx, config) {
         state.relRecent = []
         state.lastDecayAt = null
         state.storySummary = null
+        state.notes = []
       }
       await persistProgress(key)
     }
@@ -853,6 +860,7 @@ export function apply(ctx, config) {
           state.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) }
           if (!Array.isArray(state.anniversaries)) state.anniversaries = []
           if (!Array.isArray(state.roomMembers)) state.roomMembers = []
+          if (!Array.isArray(state.notes)) state.notes = []
           state.stats = { ...DEFAULT_STATS, ...(parsed.stats || {}) }
           state.economy = { ...DEFAULT_ECONOMY, ...(parsed.economy || {}) }
           state.inventory = Array.isArray(parsed.inventory) ? parsed.inventory : []
@@ -947,6 +955,25 @@ export function apply(ctx, config) {
       const agent = liveAgent()
       if (!agent) { console.error('roleplay: no agent to wake'); return }
       try { agent.steer(makeUserMessage('⏱', 'hb')); hbDiag.woken++ } catch (e) { console.error('roleplay: wake failed', e) }
+    }
+
+    // 便签到期提醒: 到期且未提醒的便签 → 桌宠气泡 + 排队一条角色口吻提醒消息
+    async function checkDueNotes(now) {
+      if (!stateLoaded || !state.enabled || !state.character) return 0
+      const due = dueNotes(state.notes || [], now instanceof Date ? now.getTime() : (Number(now) || Date.now()))
+      if (!due.length) return 0
+      for (const n of due) {
+        n.reminded = true
+        try {
+          const bt = await resolveFile(REL_ROOT + '/bubble.txt')
+          await fs.writeText(bt, '📌 ' + n.text, undefined, undefined, policyFor())
+        } catch (e) { console.error("roleplay: note bubble write failed", e) }
+        pendingHeartbeats.push('【便签提醒】你之前留给用户的便签「' + n.text + '」到时间了。以角色口吻轻轻提醒他一下(一句就好,不必长篇)。')
+      }
+      if (pendingHeartbeats.length > 3) pendingHeartbeats.splice(0, pendingHeartbeats.length - 3)
+      await saveState()
+      wakeHeartbeat()
+      return due.length
     }
 
     // ==================== 养成系统：属性衰减 / 状态 / 打工 ====================
@@ -1093,6 +1120,8 @@ export function apply(ctx, config) {
 
     async function maybeFireHeartbeat(now) {
       if (!stateLoaded || !state.enabled || !state.character) return
+      // 便签到期提醒独立于心跳槽: 到点即写入桌宠气泡 + 排队提醒消息
+      try { await checkDueNotes(now) } catch (e) { /* 提醒失败不阻塞心跳 */ }
       let fileSinceMs = null
       // 多实例防串（deskpet 与 roleplay 预设各挂一份本插件、共享 character.json）：
       // 触发前以文件里的开演开关为准——任一实例停止扮演都全局生效，
@@ -1152,6 +1181,7 @@ export function apply(ctx, config) {
       const mdToday = pad(now.getMonth() + 1) + '-' + pad(now.getDate())
       const todayAnn = ann.filter((a) => a.date && String(a.date).slice(5) === mdToday)
       if (todayAnn.length) parts.push('- 今天是' + todayAnn.map((a) => a.name).join('、') + '的日子，你记得：可以在开口时自然提起。')
+      parts.push('- 如果你心里有话想说、或想提醒用户（比如早点睡、记得吃东西），但不想打断他、也不必现在聊，可以写一张便签（调用 roleplay_note；需要到点提醒就填 remindMinutes），写完可以在回应里自然提一句「给你留了张便签」。')
       const isDiaryTime = hour === 23 && state.lastDiaryDay !== dayKey(now)
       if (isDiaryTime) parts.push('- 现在是深夜，回顾今天与用户的互动，以「' + state.character.name + '」的第一人称写今天的日记（调用 roleplay_diary 保存；若今天已写过则跳过）。')
       if (state.settings && state.settings.autoLook) parts.push('- 如果你此刻想看看用户的世界（他正在做什么），可以调用 roleplay_look_desktop 看一眼桌面再回应。')
@@ -1926,6 +1956,35 @@ export function apply(ctx, config) {
       return { ok: true, anniversaries: state.anniversaries, message: '已记住「' + args.name + '」：' + d }
     })
 
+    registerTool('roleplay_note', '写一张便签留给用户：当你心里有话想说/想提醒他（比如「记得吃早饭」「我放了一颗糖在桌上」）、但不必马上聊、或者想给他一个惊喜小纸条时调用。写完后可以在台词里自然提一句「给你留了张便签」；用户会在他自己的屏幕/桌面看到这张便签。需要到点提醒就连带填 remindMinutes（如 60=一小时后提醒他）。', {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '便签内容(1-80字),如「记得今晚早点睡」「我去洗个脸,汤在锅里」' },
+        remindMinutes: { type: 'integer', description: '可选:多少分钟后提醒用户(比如 90=一个半小时后提醒),不填则没有到点提醒' },
+      },
+      required: ['text'],
+    }, async (args) => {
+      await ensureLoaded()
+      if (!state.enabled || !state.character) return { ok: false, message: '当前没有开演。' }
+      const text = String((args && args.text) || '').trim().slice(0, 80)
+      if (!text) return { ok: false, message: '便签内容不能为空。' }
+      const m = Number(args && args.remindMinutes)
+      const now = Date.now()
+      const made = noteCreate(state.notes || [], {
+        id: 'note-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+        text, ts: now,
+        expiresAt: (Number.isFinite(m) && m > 0) ? now + m * 60000 : null,
+        source: 'ai',
+      })
+      state.notes = made.list
+      await saveState()
+      return {
+        ok: true,
+        note: made.note,
+        message: '你写了一张便签：「' + text + '」' + (made.note.expiresAt ? '，' + m + ' 分钟后会提醒他。' : '。'),
+      }
+    })
+
     registerTool('roleplay_look_desktop', '让角色主动看向用户的桌面：截取用户当前屏幕并注入对话，以角色身份观察截图、回应用户的所作所为。当剧情中角色想看看用户的世界、想知道用户在做什么、想「看」用户时调用。（注意：仅当用户开启了「心跳时自动看桌面」开关时，才适合主动看；每次主动看同轮至多一次。）', { type: 'object', properties: {} }, async () => {
       // 防滥用/隐私：仅 autoLook 开启时允许 AI 主动看桌面；同轮至多一次（用户手动按钮不受限）
       if (!(state.settings && state.settings.autoLook)) return { ok: false, message: '（她暂时没有去看的打算。）' }
@@ -2361,6 +2420,7 @@ export function apply(ctx, config) {
           economy: statsEnabled() ? { coins: (state.economy || DEFAULT_ECONOMY).coins || 0 } : null,
           savingGoal: state.savingGoal || null,
           inventory: (state.inventory || []).map((x) => ({ id: x.id, name: x.name, kind: x.kind, qty: x.qty })),
+          notes: Array.isArray(state.notes) ? visibleNotes(state.notes) : [],
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
           relation: relationEnabled() ? (isFriendStyle() ? { favor: (state.relation || DEFAULT_RELATION).favor, trust: (state.relation || DEFAULT_RELATION).trust } : { ...(state.relation || DEFAULT_RELATION) }) : null,
@@ -2441,6 +2501,25 @@ export function apply(ctx, config) {
         const events = session.events
         if (Array.isArray(events)) for (const ev of events) if (ev && typeof ev.seq === 'number' && ev.seq > last) last = ev.seq
         return { messages: msgs, lastSeq: last }
+      },
+      // 便签：列表（可见=未删除，置顶优先+时间倒序）
+      notesList: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        return visibleNotes(state.notes || [])
+      },
+      // 便签：已读/置顶/删除/记录窗口位置
+      notesAck: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const action = String((args && args.action) || '')
+        if (!id || !action) return { ok: false, message: '缺少便签 id 或操作。' }
+        const res = noteAck(state.notes || [], id, action, args && args.value)
+        if (!res.changed) return { ok: false, message: '便签不存在或操作无效。' }
+        state.notes = res.list
+        await saveState()
+        return { ok: true, note: res.note }
       },
       stop: async (args) => {
         adoptAgent(args)

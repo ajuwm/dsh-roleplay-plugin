@@ -29,6 +29,9 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/chat-core.mjs',
     'agent-presets/roleplay-friend/lib/chat-core.mjs',
     'agent-presets/roleplay-oc/lib/chat-core.mjs',
+    'agent-presets/roleplay/lib/notes-core.mjs',
+    'agent-presets/roleplay-friend/lib/notes-core.mjs',
+    'agent-presets/roleplay-oc/lib/notes-core.mjs',
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
@@ -822,6 +825,52 @@ console.log('\nT35 对话侧边栏');
   ok(h1 && Array.isArray(h1.messages) && h1.messages.length >= 1, 'chatHistory 返回历史');
   const s2 = await b.svc.chatSend({ sessionId: 't-session', text: '   ' });
   ok(s2 && s2.ok === false, '空消息被拒');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T36 便签: notes-core 纯函数 + 引擎 roleplay_note / notesAck ───
+console.log('\nT36 便签');
+{
+  const { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } = await import(new URL('../agent-presets/roleplay/lib/notes-core.mjs', import.meta.url).href);
+  let list = [];
+  const m1 = noteCreate(list, { id: 'n1', text: '记得吃早饭', ts: 1000, source: 'ai' });
+  list = m1.list;
+  ok(list.length === 1 && list[0].text === '记得吃早饭' && list[0].deleted === false && list[0].read === false, '创建便签(默认未读未删)');
+  const m2 = noteCreate(list, { id: 'n2', text: '  汤在锅里  ', ts: 2000, expiresAt: 2500 });
+  list = m2.list;
+  ok(list[1].text === '汤在锅里', '内容 trim');
+  ok(list[1].expiresAt === 2500, 'expiresAt 保留');
+  const v1 = visibleNotes(list);
+  ok(v1.length === 2 && v1[0].id === 'n2', '可见列表按时间倒序(n2 更新)');
+  const a1 = noteAck(list, 'n1', 'read');
+  ok(a1.changed && a1.list.find((n) => n.id === 'n1').read === true, '已读生效');
+  const a2 = noteAck(list, 'n1', 'pin', true);
+  ok(a2.list.find((n) => n.id === 'n1').pinned === true, '置顶生效');
+  const v2 = visibleNotes(a2.list);
+  ok(v2.length === 2 && v2[0].id === 'n1', '置顶优先排序');
+  const a3 = noteAck(list, 'n1', 'delete');
+  ok(a3.list.find((n) => n.id === 'n1').deleted === true, '删除=墓碑(不物理移除)');
+  ok(visibleNotes(a3.list).length === 1, '可见列表过滤墓碑');
+  const due = dueNotes(list, 10000);
+  ok(due.length === 1 && due[0].id === 'n2', '到期检测(未提醒+expiresAt 已过)');
+  ok(dueNotes(list, 1000).length === 0, '未到期不提醒');
+  const merged = mergeNotes([{ id: 'n1', text: 'x', deleted: true }], [{ id: 'n1', text: 'x', deleted: false }, { id: 'n3', text: 'y' }]);
+  ok(merged.length === 2 && merged.find((n) => n.id === 'n1').deleted === true && merged.find((n) => n.id === 'n3'), '跨实例合并: 删除墓碑优先+并集');
+  // 引擎集成: 工具写 → getState 可见 → ack
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const w1 = await b.call('roleplay_note', { text: '今晚早点睡' });
+  ok(w1 && w1.ok === true && w1.note && w1.note.text === '今晚早点睡', 'roleplay_note 成功');
+  let st = await b.gs();
+  ok(st.notes && st.notes.length === 1 && st.notes[0].text === '今晚早点睡', 'getState 暴露便签');
+  const ack1 = await b.svc.notesAck({ sessionId: 't-session', id: st.notes[0].id, action: 'read' });
+  ok(ack1 && ack1.ok === true, 'notesAck read 成功');
+  st = await b.gs();
+  ok(st.notes[0].read === true, '已读状态回读');
+  const ack2 = await b.call('roleplay_note', { text: '', });
+  ok(ack2 && ack2.ok === false, '空便签被拒');
+  const w2 = await b.call('roleplay_note', { text: '吃完记得回我', remindMinutes: 60 });
+  ok(w2 && w2.ok === true && w2.note.expiresAt > Date.now(), 'remindMinutes→expiresAt(将来)');
   rmSync(b.root, { recursive: true, force: true });
 }
 
