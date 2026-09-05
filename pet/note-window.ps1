@@ -1,4 +1,4 @@
-# roleplay note window (WPF) - sticky-note windows pinned to the desktop at any position.
+﻿# roleplay note window (WPF) - sticky-note windows pinned to the desktop at any position.
 # Architecture: polls the DSH bridge /roleplay/notes-list (POST), keeps one frameless
 # paper window per visible note, reports drag positions via /roleplay/notes-ack pos.
 # Usage: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File note-window.ps1 -Port <dsh-port>

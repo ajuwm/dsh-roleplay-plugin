@@ -12,13 +12,23 @@ module.exports = {
     const PRESET_ID = (config && config.presetId) || 'deskpet'
     // 路径根：桌宠资源/嘀咕数据均在 DSH 工作区内（fs sandbox=workspace-write，仅允许写工作区）。
     // DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
+    // ⚠ 关键：sandboxPolicy.workspaceRoot 是 DSH 进程启动目录（宿主组合里配置为 process.cwd()，
+    // 例如在 C:\Program Files\nodejs 里执行 "dsh web" 时），并不等于会话工作区！
+    // 必须优先用目标会话的 header.cwd（与 roleplay-host.mjs 的 workspaceRoot() 同一口径）。
     const os = require('node:os'), path = require('node:path')
-    const wr = (ctx.sandboxPolicy && ctx.sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
-    const PET_DIR = process.env.DSH_PET_DIR || path.join(wr, 'pet')
-    const IMAGE = PET_DIR + '\\lihui.png'
-    const SCRIPT = PET_DIR + '\\pet-window.ps1'
-    const NOTE_SCRIPT = PET_DIR + '\\note-window.ps1'
-    const CONFIG_FILE = PET_DIR + '\\config.json'
+    function workspaceRoot() {
+      try {
+        if (targetSessionId) {
+          const a = agents.get(targetSessionId)
+          if (a && a.session && a.session.header && a.session.header.cwd) return a.session.header.cwd
+        }
+      } catch (e) { console.error('[deskpet] workspaceRoot fall', e && e.message) }
+      return (ctx.sandboxPolicy && ctx.sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
+    }
+    function petDir() { return process.env.DSH_PET_DIR || path.join(workspaceRoot(), 'pet') }
+    const IMAGE = () => petDir() + '\\lihui.png'
+    const SCRIPT = () => petDir() + '\\pet-window.ps1'
+    const NOTE_SCRIPT = () => petDir() + '\\note-window.ps1'
     const PORT = (webServer && typeof webServer.port === 'number') ? webServer.port : 3080
 
     let targetSessionId = null
@@ -85,9 +95,12 @@ module.exports = {
 
     async function writeConfig(patch) {
       try {
-        const target = await fs.resolve(CONFIG_FILE)
-        const raw = await fs.readText(target)
-        const cfg = JSON.parse(raw || '{}')
+        const target = await fs.resolve(path.join(petDir(), 'config.json'))
+        let cfg = {}
+        try {
+          const raw = await fs.readText(target)
+          cfg = JSON.parse(raw || '{}')
+        } catch (e) { /* 首次/缺失: 从空配置开始 */ }
         Object.assign(cfg, patch)
         await fs.writeText(target, JSON.stringify(cfg), undefined, undefined, getPolicy())
       } catch (e) { console.error("[deskpet] keep in-memory state", e) }
@@ -179,26 +192,30 @@ module.exports = {
     }
 
     // 配置监视：config.json 的 enabled 驱动窗口起停（侧栏按钮 / 手动改文件均生效）。
+    // 配置监视：config.json 的 enabled 驱动窗口起停（侧栏按钮 / 手动改文件均生效）。
+    // 注意：配置缺失/损坏时【默认启用】并继续尝试启动（与“启动中…卡死”问题一致——
+    // 之前读不到配置会整个静默跳过，永远不调用 startPet/startNotes）。
     async function checkConfig() {
+      let cfg = {}
       try {
-        const target = await fs.resolve(CONFIG_FILE)
+        const target = await fs.resolve(path.join(petDir(), 'config.json'))
         const raw = await fs.readText(target)
-        const cfg = JSON.parse(raw)
-        const enabled = cfg && typeof cfg.enabled === 'boolean' ? cfg.enabled : true
-        const notes = cfg && typeof cfg.noteEnabled === 'boolean' ? cfg.noteEnabled : true
-        petEnabled = enabled
-        noteEnabled = notes
-        if (petEnabled && !petProc) {
-          startPet().catch((e) => console.error('[deskpet] config start', e))
-        } else if (!petEnabled && petProc) {
-          stopPet()
-        }
-        if (noteEnabled && !noteProc) {
-          startNotes().catch((e) => console.error('[deskpet] config notes start', e))
-        } else if (!noteEnabled && noteProc) {
-          stopNotes()
-        }
-      } catch (e) { console.error("[deskpet] config unreadable", e) }
+        cfg = JSON.parse(raw || '{}')
+      } catch (e) { console.error('[deskpet] config unreadable, start with defaults', e && e.message) }
+      const enabled = cfg && typeof cfg.enabled === 'boolean' ? cfg.enabled : true
+      const notes = cfg && typeof cfg.noteEnabled === 'boolean' ? cfg.noteEnabled : true
+      petEnabled = enabled
+      noteEnabled = notes
+      if (petEnabled && !petProc) {
+        startPet().catch((e) => console.error('[deskpet] config start', e))
+      } else if (!petEnabled && petProc) {
+        stopPet()
+      }
+      if (noteEnabled && !noteProc) {
+        startNotes().catch((e) => console.error('[deskpet] config notes start', e))
+      } else if (!noteEnabled && noteProc) {
+        stopNotes()
+      }
     }
 
     async function drain() {
@@ -216,10 +233,14 @@ module.exports = {
     async function startPet() {
       if (petProc) return
       let exe = 'powershell.exe'
-      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) {}
+      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
+      const dir = petDir()
+      const script = SCRIPT()
+      const image = IMAGE()
+      console.error('[deskpet] startPet dir=' + dir + ' script=' + script + ' image=' + image + ' port=' + PORT)
       const proc = subprocess.spawn({
-        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', SCRIPT, '-Image', IMAGE, '-Name', '\u684c\u5ba0', '-Port', String(PORT)],
-        cwd: PET_DIR,
+        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script, '-Image', image, '-Name', '\u684c\u5ba0', '-Port', String(PORT)],
+        cwd: dir,
         stdio: {
           stdin: 'ignore',
           stdout: { collect: { maxBytes: 8192 } },
@@ -248,10 +269,13 @@ module.exports = {
     async function startNotes() {
       if (noteProc) return
       let exe = 'powershell.exe'
-      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) {}
+      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
+      const dir = petDir()
+      const script = NOTE_SCRIPT()
+      console.error('[deskpet] startNotes dir=' + dir + ' script=' + script + ' port=' + PORT)
       const proc = subprocess.spawn({
-        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', NOTE_SCRIPT, '-Port', String(PORT)],
-        cwd: PET_DIR,
+        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script, '-Port', String(PORT)],
+        cwd: dir,
         stdio: {
           stdin: 'ignore',
           stdout: { collect: { maxBytes: 8192 } },
@@ -352,7 +376,7 @@ module.exports = {
     let lastBubbleShown = ''
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/bubble', handler: async (req, res) => {
       try {
-        const target = await fs.resolve(path.join(wr, '.roleplay', 'bubble.txt'))
+        const target = await fs.resolve(path.join(workspaceRoot(), '.roleplay', 'bubble.txt'))
         const info = await fs.stat(target)
         if (info === undefined) return json(res, 200, { text: '' })
         const text = (await fs.readText(target)).trim()
@@ -372,7 +396,7 @@ module.exports = {
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/mood', handler: async (req, res) => {
       const idle = { emoji: '\uD83D\uDCA4', label: '\u672A\u5F00\u6F14', tone: 'idle' }
       try {
-        const target = await fs.resolve(path.join(wr, '.roleplay', 'character.json'))
+        const target = await fs.resolve(path.join(workspaceRoot(), '.roleplay', 'character.json'))
         const info = await fs.stat(target)
         if (info === undefined) return json(res, 200, { ok: true, mood: idle })
         const st = JSON.parse(await fs.readText(target))
