@@ -14,6 +14,7 @@ import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dim
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
 import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
 import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
+import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -219,7 +220,7 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, notes: [], schema_version: SCHEMA_VERSION }
+    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, notes: [], game: null, gameRewards: {}, schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -772,7 +773,7 @@ export function apply(ctx, config) {
     // 按角色隔离的「进度」：亲密度（好感/信任/心动/男友力/里程碑）、养成数值（stats/economy）、
     // 背包、攒钱目标、纪念日、近期记录、日记日期 —— 每个角色一份 progress-<角色名>.json。
     // 切换角色时 persist 旧的、load 新的；character.json 不再存这些字段（只留角色卡与设置）。
-    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay', 'storySummary', 'notes']
+    const PROGRESS_FIELDS = ['relation', 'boyfriend', 'milestones', 'stats', 'economy', 'inventory', 'savingGoal', 'anniversaries', 'recentActs', 'relRecent', 'lastDecayAt', 'lastDiaryDay', 'storySummary', 'notes', 'game', 'gameRewards']
     function stateForSave() {
       const out = {}
       for (const k of Object.keys(state)) if (!PROGRESS_FIELDS.includes(k)) out[k] = state[k]
@@ -805,6 +806,8 @@ export function apply(ctx, config) {
             if (Array.isArray(p.recentActs)) state.recentActs = p.recentActs
             if (Array.isArray(p.relRecent)) state.relRecent = p.relRecent.slice(-8)
             if (Array.isArray(p.notes)) state.notes = p.notes.filter((n) => n && n.id)
+            if (p.game && typeof p.game === 'object') state.game = p.game
+            if (p.gameRewards && typeof p.gameRewards === 'object') state.gameRewards = p.gameRewards
             state.lastDecayAt = (typeof p.lastDecayAt === 'number' && Number.isFinite(p.lastDecayAt)) ? p.lastDecayAt : null
             if (typeof p.storySummary === 'string') state.storySummary = p.storySummary.slice(0, 500) || null
             if (p.lastDiaryDay !== undefined) state.lastDiaryDay = p.lastDiaryDay || null
@@ -829,6 +832,8 @@ export function apply(ctx, config) {
         state.lastDecayAt = null
         state.storySummary = null
         state.notes = []
+        state.game = null
+        state.gameRewards = {}
       }
       await persistProgress(key)
     }
@@ -1985,8 +1990,167 @@ export function apply(ctx, config) {
       }
     })
 
-    registerTool('roleplay_look_desktop', '让角色主动看向用户的桌面：截取用户当前屏幕并注入对话，以角色身份观察截图、回应用户的所作所为。当剧情中角色想看看用户的世界、想知道用户在做什么、想「看」用户时调用。（注意：仅当用户开启了「心跳时自动看桌面」开关时，才适合主动看；每次主动看同轮至多一次。）', { type: 'object', properties: {} }, async () => {
-      // 防滥用/隐私：仅 autoLook 开启时允许 AI 主动看桌面；同轮至多一次（用户手动按钮不受限）
+    // ── 小游戏: 宿主管规则, AI 管口吻 ──────────────────────────────
+    const GAME_INTRO = {
+      guess: '猜数字: 我心里想了个 1-100 的数, 你有 10 次机会猜; 每次我会告诉你大了还是小了。',
+      twenty: '二十问: 我心里想了一个东西(动物/食物/物品/职业等), 你最多问 20 个「是/不是」的问题, 随时可以猜答案。',
+      ttt: '井字棋: 三子连珠获胜, 你先手。',
+      truth: '真心话大冒险: 你选「真心话」我认真回答; 选「大冒险」我接受一个小挑战。',
+    }
+    function startGame(kind) {
+      const g = { guess: () => guessStart(100, 10), twenty: () => twentyStart(), ttt: () => tttStart(), truth: () => truthStart(truthTierOf(relationStage())) }[kind]
+      return g ? g() : null
+    }
+    function publicGameState() {
+      const g = state.game
+      if (!g) return null
+      if (g.kind === 'guess') return { kind: 'guess', range: g.range, limit: g.limit, tries: g.tries, triesLeft: Math.max(0, g.limit - g.tries), lastResult: g.lastResult || null, over: !!g.over, won: !!g.won }
+      if (g.kind === 'twenty') return { kind: 'twenty', asks: g.asks, limit: g.limit, over: !!g.over, won: !!g.won, answered: Array.isArray(g.log) ? g.log : [] }
+      if (g.kind === 'ttt') return { kind: 'ttt', board: g.board, your: g.your, ai: g.ai, over: !!g.over, winner: g.winner || null }
+      if (g.kind === 'truth') return { kind: 'truth', tier: g.tier, round: g.round, pending: !!g.pending, lastPrompt: g.lastPrompt || null }
+      return { kind: g.kind }
+    }
+    function injectGame(text) {
+      const agent = liveAgent()
+      if (!agent) return false
+      try { agent.send(makeUserMessage(text, 'game'), 'next-turn', true); return true } catch (e) { return false }
+    }
+    // 每日每种游戏首胜全额奖励, 之后减半(防刷)
+    function gameReward(kind, base) {
+      if (!statsEnabled()) return { gained: 0, mood: 0, first: false }
+      const day = dayKey(new Date())
+      if (!state.gameRewards || typeof state.gameRewards !== 'object') state.gameRewards = {}
+      if (!state.gameRewards[day] || typeof state.gameRewards[day] !== 'object') state.gameRewards[day] = {}
+      const first = !(state.gameRewards[day][kind] > 0)
+      state.gameRewards[day][kind] = (state.gameRewards[day][kind] || 0) + 1
+      const mult = first ? 1 : 0.5
+      const s = state.stats || (state.stats = { ...DEFAULT_STATS })
+      const moodGain = Math.round((base.mood || 8) * mult)
+      s.mood = clamp(s.mood + moodGain, 0, 100)
+      const e = state.economy || (state.economy = { ...DEFAULT_ECONOMY })
+      const coinGain = Math.round((base.coins || 15) * mult)
+      e.coins = (e.coins || 0) + coinGain
+      return { gained: coinGain, mood: moodGain, first }
+    }
+    async function doGameStart(kind) {
+      await ensureLoaded()
+      if (!state.enabled || !state.character) return { ok: false, message: '请先开始角色扮演。' }
+      const g = startGame(kind)
+      if (!g) return { ok: false, message: '不支持的游戏: ' + kind }
+      state.game = g
+      await saveState()
+      const text = '【游戏】' + GAME_INTRO[kind] + ' 请以角色口吻自然地开场接住这个提议(可以说「好呀」之类), 然后等待玩家的行动。'
+      injectGame(text)
+      return { ok: true, game: publicGameState(), message: GAME_INTRO[kind] }
+    }
+    async function doGameMove(move) {
+      await ensureLoaded()
+      const g = state.game
+      if (!g) return { ok: false, message: '当前没有进行中的游戏。' }
+      const cur = state.character ? state.character.name : '她'
+      let note = ''
+      let reward = null
+      if (g.kind === 'guess') {
+        const next = guessMove(g, Number(move && move.n))
+        if (next.lastResult === 'invalid') return { ok: false, message: '请输入一个数字。' }
+        state.game = next
+        const hint = guessHintText(next.lastResult, next.secret)
+        if (next.lastResult === 'win' || next.lastResult === 'lose') {
+          reward = next.lastResult === 'win' ? gameReward('guess', { mood: 8, coins: 15 }) : null
+          const rw = reward ? (' 奖励: ' + reward.gained + ' 金币, 心情 +' + reward.mood) : ''
+          note = '【游戏-猜数字】玩家猜了 ' + next.history[next.history.length - 1] + '。事实: 秘密数是 ' + next.secret + ', 结果: ' + (next.won ? '猜中了!' : '次数用完了(没猜中)。') + rw + ' 请以角色口吻回应这个结局(赢了可以夸张地佩服/懊恼; 输了可以不甘心地求再来一局), 然后结束这局。'
+        } else {
+          note = '【游戏-猜数字】玩家猜了 ' + next.history[next.history.length - 1] + '。事实: ' + hint + '(秘密数 ' + next.secret + ' 不可泄露)。还剩 ' + (next.limit - next.tries) + ' 次。请以角色口吻俏皮地提示 + 等玩家继续猜。'
+        }
+      } else if (g.kind === 'twenty') {
+        const q = String((move && move.q) || '').trim()
+        const guessW = String((move && move.guess) || '').trim()
+        if (guessW) {
+          const word = TWENTY_WORDS[g.secretIndex]
+          const hit = twentyGuess(word, guessW)
+          state.game = { ...g, over: true, won: hit }
+          if (hit) reward = gameReward('twenty', { mood: 10, coins: 20 })
+          const rw = reward ? (' 奖励: ' + reward.gained + ' 金币, 心情 +' + reward.mood) : ''
+          note = '【游戏-二十问】玩家猜了: "' + guessW + '"。事实: 答案就是 ' + word.noun + ', 玩家' + (hit ? '猜中了!' : '没猜中。') + rw + ' 请以角色口吻回应整个结局。'
+        } else if (q) {
+          if (g.asks >= g.limit) {
+            state.game = { ...g, over: true, won: false }
+            note = '【游戏-二十问】玩家已经问满 ' + g.limit + ' 个问题。事实: 这次他没猜中(答案是 ' + TWENTY_WORDS[g.secretIndex].noun + ')。请以角色口吻揭晓答案并邀请再来一局。'
+          } else {
+            const word = TWENTY_WORDS[g.secretIndex]
+            const cond = twentyClassify(q)
+            let inner = ''
+            if (!cond) {
+              inner = '这个问法无法用「是/不是」回答(比如开放式问题/猜测性描述)。请以角色口吻告诉玩家: 这个问题不能算, 请换一种问法(示例: 是动物吗 / 能吃吗 / 会飞吗 / 是红色的吗 / 很大吗)。'
+            } else {
+              const ans = twentyJudge(word, cond) || 'no'
+              state.game = { ...g, asks: g.asks + 1, log: (g.log || []).concat([{ q, a: ans }]) }
+              inner = '玩家问: "' + q + '"。事实: 答案=是' + (ans === 'yes' ? '' : '不是') + '。请先说「是/不是」, 再用角色口吻补一句俏皮话, 等待下个问题(还剩 ' + (g.limit - g.asks - 1) + ' 问)。'
+            }
+            note = '【游戏-二十问】' + inner
+          }
+        } else {
+          return { ok: false, message: '请输入问题或直接猜答案。' }
+        }
+      } else if (g.kind === 'ttt') {
+        const next = tttApply(g, Number(move && move.cell))
+        if (next.lastResult === 'invalid') return { ok: false, message: '那个格子已经有人了。' }
+        state.game = next
+        const boardTxt = tttBoardText(next.board)
+        if (next.over) {
+          const win = next.winner === next.your
+          if (win) reward = gameReward('ttt', { mood: 8, coins: 15 })
+          const rw = reward ? (' 奖励: ' + reward.gained + ' 金币, 心情 +' + reward.mood) : ''
+          const resultTxt = next.winner === 'draw' ? '平局!' : (win ? '你赢了!' : '我赢了!')
+          note = '【游戏-井字棋】终局: ' + resultTxt + rw + ' 当前棋盘:\n' + boardTxt + '\n请以角色口吻回应结局。'
+        } else {
+          const aiCell = next.aiCell
+          note = '【游戏-井字棋】你下了第 ' + (Number(move.cell) + 1) + ' 格, ' + cur + ' 应了第 ' + ((aiCell || 0) + 1) + ' 格。当前棋盘:\n' + boardTxt + '\n请以角色口吻挑衅/吐槽一句, 然后等待玩家下一步。'
+        }
+      } else if (g.kind === 'truth') {
+        const choice = String((move && move.choice) || '')
+        if (choice !== 'truth' && choice !== 'dare') return { ok: false, message: '请选择 真心话 或 大冒险。' }
+        const item = truthDraw(g.tier, g.round)
+        reward = gameReward('truth', { mood: 5, coins: 10 })
+        const rwNote = reward ? (' 完成奖励: ' + reward.gained + ' 金币, 心情 +' + reward.mood) : ''
+        state.game = { ...g, round: g.round + 1, pending: true, lastPrompt: item.text, lastKind: item.kind }
+        note = '【游戏-真心话】本轮玩家抽了「' + (choice === 'truth' ? '真心话' : '大冒险') + '」。题目: ' + item.text + '。请以角色口吻认真' + (item.kind === 'dare' ? '完成这个小挑战' : '回答这个问题') + '。' + rwNote
+      } else {
+        return { ok: false, message: '未知游戏状态。' }
+      }
+      await saveState()
+      injectGame(note)
+      return { ok: true, text: note, game: publicGameState(), reward }
+    }
+
+    registerTool('roleplay_game', '小游戏(规则由引擎判定, 你只负责用角色身份扮演): ' + GAME_INTRO.guess + ' ' + GAME_INTRO.twenty + ' ' + GAME_INTRO.ttt + ' ' + GAME_INTRO.truth + ' 当玩家提议一起玩游戏(或说「陪我玩」)时, 调用 start 接下提议; 游戏结束时调用 quit 结束。', {
+      type: 'object',
+      properties: {
+        action: { type: 'string', description: 'start=开始一局 / quit=结束游戏' },
+        game: { type: 'string', description: 'guess=猜数字 / twenty=二十问 / ttt=井字棋 / truth=真心话大冒险' },
+      },
+      required: ['action', 'game'],
+    }, async (args) => {
+      await ensureLoaded()
+      if (!state.enabled || !state.character) return { ok: false, message: '当前没有开演。' }
+      const action = String((args && args.action) || '')
+      const game = String((args && args.game) || '')
+      if (action === 'quit') {
+        state.game = null
+        await saveState()
+        return { ok: true, message: '游戏已结束。' }
+      }
+      if (action === 'start') {
+        const g = startGame(game)
+        if (!g) return { ok: false, message: '不支持的游戏: ' + game }
+        state.game = g
+        await saveState()
+        return { ok: true, game, message: GAME_INTRO[game] }
+      }
+      return { ok: false, message: 'action 必须是 start/quit。' }
+    })
+
+    registerTool('roleplay_look_desktop', '让角色主动看向用户的桌面：截取用户当前屏幕并注入对话，以角色身份观察截图、回应用户的所作所为。当剧情中角色想看看用户的世界、想知道用户在做什么、想「看」用户时调用。（注意：仅当用户开启了「心跳时自动看桌面」开关时，才适合主动看；每次主动看同轮至多一次。）', { type: 'object', properties: {} }, async () => {      // 防滥用/隐私：仅 autoLook 开启时允许 AI 主动看桌面；同轮至多一次（用户手动按钮不受限）
       if (!(state.settings && state.settings.autoLook)) return { ok: false, message: '（她暂时没有去看的打算。）' }
       const turnKey = () => lastTurnStart || Date.now()
       if (lastLookTurn === turnKey()) return { ok: false, message: '（她刚刚看过了。）' }
@@ -2421,6 +2585,7 @@ export function apply(ctx, config) {
           savingGoal: state.savingGoal || null,
           inventory: (state.inventory || []).map((x) => ({ id: x.id, name: x.name, kind: x.kind, qty: x.qty })),
           notes: Array.isArray(state.notes) ? visibleNotes(state.notes) : [],
+          game: publicGameState(),
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
           relation: relationEnabled() ? (isFriendStyle() ? { favor: (state.relation || DEFAULT_RELATION).favor, trust: (state.relation || DEFAULT_RELATION).trust } : { ...(state.relation || DEFAULT_RELATION) }) : null,
@@ -2520,6 +2685,27 @@ export function apply(ctx, config) {
         state.notes = res.list
         await saveState()
         return { ok: true, note: res.note }
+      },
+      // 小游戏(玩家侧): 开始/行动/状态
+      gameStart: async (args) => {
+        adoptAgent(args)
+        return doGameStart(String((args && args.kind) || ''))
+      },
+      gameMove: async (args) => {
+        adoptAgent(args)
+        return doGameMove(args && args.move)
+      },
+      gameState: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        return publicGameState()
+      },
+      gameQuit: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        state.game = null
+        await saveState()
+        return { ok: true }
       },
       stop: async (args) => {
         adoptAgent(args)

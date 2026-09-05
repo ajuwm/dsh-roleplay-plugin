@@ -32,6 +32,9 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/notes-core.mjs',
     'agent-presets/roleplay-friend/lib/notes-core.mjs',
     'agent-presets/roleplay-oc/lib/notes-core.mjs',
+    'agent-presets/roleplay/lib/game-core.mjs',
+    'agent-presets/roleplay-friend/lib/game-core.mjs',
+    'agent-presets/roleplay-oc/lib/game-core.mjs',
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
@@ -871,6 +874,59 @@ console.log('\nT36 便签');
   ok(ack2 && ack2.ok === false, '空便签被拒');
   const w2 = await b.call('roleplay_note', { text: '吃完记得回我', remindMinutes: 60 });
   ok(w2 && w2.ok === true && w2.note.expiresAt > Date.now(), 'remindMinutes→expiresAt(将来)');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T37 小游戏: game-core 纯函数 + 引擎 gameStart/gameMove/gameState ───
+console.log('\nT37 小游戏');
+{
+  const G = await import(new URL('../agent-presets/roleplay/lib/game-core.mjs', import.meta.url).href);
+  // 猜数字
+  const gs = G.guessStart(100, 10);
+  ok(gs.secret >= 1 && gs.secret <= 100 && gs.limit === 10, 'guessStart 秘密数在范围内');
+  const hi = G.guessMove(gs, gs.secret + 1);
+  ok(hi.lastResult === 'high' && !hi.over, '猜大提示');
+  const lo = G.guessMove(gs, gs.secret - 1);
+  ok(lo.lastResult === 'low', '猜小提示');
+  const win = G.guessMove(gs, gs.secret);
+  ok(win.over && win.won && win.lastResult === 'win', '猜中即赢');
+  let st2 = gs;
+  for (let i = 0; i < 10; i++) st2 = G.guessMove(st2, gs.secret + 1);
+  ok(st2.over && !st2.won, '10 次用尽判负');
+  // 井字棋
+  const t0 = G.tttStart();
+  ok(t0.board.length === 9 && t0.your === 'X', 'ttt 初始棋盘');
+  const t1 = G.tttApply(t0, 0);
+  ok(t1.board.charAt(0) === 'X' && t1.board.charAt(4) === 'O', '玩家落子+AI 抢中心');
+  ok(G.tttWinner('XXX      ') === 'X', '三连判胜');
+  ok(G.tttWinner('XOXOXOXOX') !== null, '满盘结束');
+  const t2 = G.tttApply(t1, 1);
+  ok(t2.moves === 2 && !t2.over, '第二回合(无终局)');
+  // 二十问
+  const wd = G.TWENTY_WORDS.find((w) => w.noun === '苹果');
+  ok(G.twentyJudge(wd, { edible: true }) === 'yes', '特征命中=是');
+  ok(G.twentyJudge(wd, { cat: 'animal' }) === 'no', '特征不中=不是');
+  const c1 = G.twentyClassify('它是动物吗');
+  ok(c1 && c1.animal === true, '问题→特征条件(动物)');
+  const c2 = G.twentyClassify('这是一个很可爱的谜底呀');
+  ok(c2 === null, '无法判定的问法→null');
+  ok(G.twentyGuess(wd, '苹果') === true && G.twentyGuess(wd, '大苹果') === false && G.twentyGuess(wd, '梨') === false, '猜词命中(全匹配含≥2字)/不匹配');
+  // 真心话
+  ok(G.truthTierOf('special') === 3 && G.truthTierOf('close_friend') === 2 && G.truthTierOf('stranger') === 1, '关系档位→题库档');
+  const tr = G.truthDraw(3, 0, () => 0);
+  ok(tr && tr.text && (tr.kind === 'truth' || tr.kind === 'dare'), '抽题有效');
+  // 引擎集成: start 注入开场, state 不泄密, quit 清空
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const g1 = await b.svc.gameStart({ sessionId: 't-session', kind: 'guess' });
+  ok(g1 && g1.ok === true && g1.game && g1.game.kind === 'guess', '引擎 gameStart 成功');
+  const ev1 = await b.svc.chatPoll({ sessionId: 't-session', since: 0 });
+  ok(ev1.messages.some((m) => String(m.text).includes('【游戏】')), '开局注入消息');
+  const gs2 = await b.svc.gameState({ sessionId: 't-session' });
+  ok(gs2 && gs2.kind === 'guess' && gs2.secret === undefined, 'gameState 不泄露秘密数');
+  const q1 = await b.svc.gameQuit({ sessionId: 't-session' });
+  ok(q1 && q1.ok === true, 'gameQuit 成功');
+  ok((await b.svc.gameState({ sessionId: 't-session' })) === null, '退出后无游戏');
   rmSync(b.root, { recursive: true, force: true });
 }
 
