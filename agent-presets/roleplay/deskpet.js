@@ -320,6 +320,10 @@ module.exports = {
         tickle: '\uff08\u4f60\u4f38\u624b\u631b\u4e86\u631b\u5979\u7684\u75d2\u75d2\uff09',
         poke: '\uff08\u4f60\u7528\u624b\u6307\u8f7b\u8f7b\u6233\u4e86\u6233\u5979\u7684\u8138\u989a\uff09',
         hug: '\uff08\u4f60\u5f20\u5f00\u53cc\u81c2\uff0c\u7ed9\u4e86\u5979\u4e00\u4e2a\u5927\u5927\u7684\u62e5\u62b1\uff09',
+        brush: '\uff08\u4f60\u8f7b\u8f7b\u5e2e\u5979\u68b3\u4e86\u68b3\u5934\u53d1\uff0c\u5979\u7f29\u4e86\u7f29\u8116\u5b50\uff0c\u6709\u70b9\u75d2\uff09',
+        handshake: '\uff08\u4f60\u4f38\u51fa\u624b\uff0c\u5979\u60a3\u4e86\u4e00\u4e0b\u2014\u2014\u7136\u540e\u8f7b\u8f7b\u63e1\u4f4f\u4e86\uff0c\u6307\u5c16\u6709\u70b9\u51c9\uff09',
+        kiss: '\uff08\u4f60\u503e\u8eab\uff0c\u5728\u5979\u989d\u5934\u8f7b\u8f7b\u843d\u4e0b\u4e00\u4e2a\u543b\uff09',
+        pout: '\uff08\u4f60\u6545\u610f\u9017\u5979\uff0c\u5979\u9f13\u8d77\u4e86\u816e\u5e2e\u5b50\uff0c\u5047\u88c5\u751f\u6c14\uff09',
       }
       json(res, 200, sendPetMessage(lines[kind] || lines.pat, String(reqId || 'r' + Date.now())))
     } }))
@@ -362,6 +366,31 @@ module.exports = {
 
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/status', handler: (req, res) => {
       json(res, 200, { ok: true, window: petProc ? 'running' : 'stopped', enabled: petEnabled, session: targetSessionId })
+    } }))
+
+    // 桌宠心情角标: 读共享 character.json 的 stats/relation 推导表情(文件级, 无会话依赖)
+    routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/mood', handler: async (req, res) => {
+      const idle = { emoji: '\uD83D\uDCA4', label: '\u672A\u5F00\u6F14', tone: 'idle' }
+      try {
+        const target = await fs.resolve(path.join(wr, '.roleplay', 'character.json'))
+        const info = await fs.stat(target)
+        if (info === undefined) return json(res, 200, { ok: true, mood: idle })
+        const st = JSON.parse(await fs.readText(target))
+        const s = (st && st.stats) || {}
+        const rel = (st && st.relation) || {}
+        let mood = idle
+        if ((s.hp || 100) <= 0) mood = { emoji: '\uD83D\uDCA4', label: '\u7761\u68A6\u4E2D', tone: 'red' }
+        else if ((s.health || 85) <= 10) mood = { emoji: '\uD83E\uDD15', label: '\u5371\u6025', tone: 'red' }
+        else if ((s.satiety || 75) < 20 || (s.health || 85) < 40) mood = { emoji: '\uD83E\uDD12', label: '\u865A\u5F31', tone: 'orange' }
+        else if ((s.satiety || 75) < 40) mood = { emoji: '\uD83C\uDF5A', label: '\u997F\u4E86', tone: 'yellow' }
+        else if ((s.mood || 70) < 30) mood = { emoji: '\uD83D\uDC3F', label: '\u4F4E\u843D', tone: 'yellow' }
+        else if ((rel.heart || 0) >= 67) mood = { emoji: '\uD83D\uDC97', label: '\u5FC3\u52A8', tone: 'pink' }
+        else if ((rel.favor || 0) >= 67) mood = { emoji: '\uD83E\uDD70', label: '\u4EB2\u8FD1', tone: 'green' }
+        else if ((rel.favor || 0) >= 34) mood = { emoji: '\uD83D\uDE42', label: '\u4E0D\u9519', tone: 'green' }
+        json(res, 200, { ok: true, mood })
+      } catch (e) {
+        json(res, 200, { ok: true, mood: idle })
+      }
     } }))
 
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/start', handler: async (req, res) => {

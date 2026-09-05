@@ -155,6 +155,21 @@ $img.Effect = $eff
 [System.Windows.Controls.Grid]::SetRow($img, 1)
 $null = $grid.Children.Add($img)
 
+# 心情角标: 立绘右上角小徽章(读 /pet/mood, 每 10s 刷新)
+$moodBadge = New-Object System.Windows.Controls.Border
+$moodBadge.CornerRadius = New-Object System.Windows.CornerRadius(999)
+$moodBadge.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(215, 24, 26, 34))
+$moodBadge.Padding = New-Object System.Windows.Thickness(7, 2, 7, 2)
+$moodBadge.Margin = New-Object System.Windows.Thickness(0, 6, 10, 0)
+$moodBadge.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+$moodBadge.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+$moodText = New-Object System.Windows.Controls.TextBlock
+$moodText.FontSize = 12
+$moodText.Text = '💤'
+$moodBadge.Child = $moodText
+[System.Windows.Controls.Grid]::SetRow($moodBadge, 1)
+$null = $grid.Children.Add($moodBadge)
+
 $inputPanel = New-Object System.Windows.Controls.StackPanel
 $inputPanel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
 $inputPanel.Visibility = [System.Windows.Visibility]::Collapsed
@@ -194,6 +209,33 @@ $bobTimer.Add_Tick({
   $script:bobPhase += 0.055
   $translate.Y = [Math]::Sin($script:bobPhase) * 7
 })
+
+# 触摸动画: 弹跳(bounce) + 生气抖动(shake)
+function Play-TouchAnim([string]$kind) {
+  $frames = 0
+  $animTimer = New-Object System.Windows.Threading.DispatcherTimer
+  $animTimer.Interval = [TimeSpan]::FromMilliseconds(40)
+  $animTimer.Add_Tick({
+    $frames++
+    $f = $frames / 12.0
+    if ($f -ge 1) { $animTimer.Stop(); $scale.ScaleX = 1; $scale.ScaleY = 1; return }
+    $s = 1 + [Math]::Sin($f * [Math]::PI) * 0.18
+    $scale.ScaleX = $s
+    $scale.ScaleY = $s
+  })
+  $animTimer.Start()
+  if ($kind -eq 'pout') {
+    $shake = New-Object System.Windows.Threading.DispatcherTimer
+    $shake.Interval = [TimeSpan]::FromMilliseconds(35)
+    $script:shakePhase = 0
+    $shake.Add_Tick({
+      $script:shakePhase++
+      if ($script:shakePhase -gt 8) { $shake.Stop(); $translate.X = 0; return }
+      $translate.X = [Math]::Sin($script:shakePhase) * 4
+    })
+    $shake.Start()
+  }
+}
 
 # ---------- interaction state ----------
 $script:reqSeq = 0
@@ -243,6 +285,7 @@ function Send-Touch([string]$kind) {
   $rot = New-Object System.Windows.Media.Animation.DoubleAnimation(-3, (New-Object System.Windows.Duration([TimeSpan]::FromMilliseconds(160))))
   $rot.AutoReverse = $true
   $rotate.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $rot)
+  if ($kind -eq 'pout') { Play-TouchAnim 'pout' }
   Show-Bubble '……'
   $id = New-ReqId
   $resp = Post-Json '/touch' @{ kind = $kind; id = $id }
@@ -458,6 +501,10 @@ Add-Menu '投喂' { try { $null = Post-Json '/feed' (@{} | ConvertTo-Json); Show
 Add-Menu '摸头' { Send-Touch 'pat' }
 Add-Menu '挠痒痒' { Send-Touch 'tickle' }
 Add-Menu '戳一戳' { Send-Touch 'poke' }
+Add-Menu '梳头发' { Send-Touch 'brush' }
+Add-Menu '握握手' { Send-Touch 'handshake' }
+Add-Menu '亲一下' { Send-Touch 'kiss' }
+Add-Menu '逗生气' { Send-Touch 'pout' }
 Add-Menu '设置' { Open-Settings }
 Add-Menu '退出（并停用桌宠）' {
   $script:cfg.enabled = $false
@@ -512,10 +559,34 @@ $bubblePollTimer.Add_Tick({
 })
 $bubblePollTimer.Start()
 
+# ---------- mood badge poll（心情角标: 读 /pet/mood） ----------
+$moodTimer = New-Object System.Windows.Threading.DispatcherTimer
+$moodTimer.Interval = [TimeSpan]::FromSeconds(10)
+$moodTimer.Add_Tick({
+  try {
+    $resp = Get-Json '/mood'
+    if ($resp -and $resp.ok -and $resp.mood) {
+      $m = $resp.mood
+      if ($moodText.Text -ne [string]$m.emoji) { $moodText.Text = [string]$m.emoji }
+      $el = New-Object System.Windows.Controls.ToolTip
+      $el.Content = [string]$m.label
+      $moodBadge.ToolTip = $el
+      $c = [System.Windows.Media.ColorConverter]::ConvertFromString(
+        switch ([string]$m.tone) {
+          'red' { '#E06A6A' } 'orange' { '#E0A050' } 'yellow' { '#DDC94E' }
+          'pink' { '#E88AA8' } default { '#4ED17E' }
+        })
+      $moodBadge.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(215, $c.R, $c.G, $c.B))
+    }
+  } catch { }
+})
+$moodTimer.Start()
+
 $win.Add_Closed({
   $bobTimer.Stop()
   $pollTimer.Stop()
   $bubblePollTimer.Stop()
+  $moodTimer.Stop()
 })
 
 Apply-Scale
