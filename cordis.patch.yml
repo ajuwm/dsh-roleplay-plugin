@@ -7,3 +7,6 @@
 - insert:
     - id: roleplay-client
       name: '@ajuwm/dsh-roleplay-plugin'
+
+    - id: roleplay-settings
+      name: '@ajuwm/dsh-roleplay-plugin/settings'

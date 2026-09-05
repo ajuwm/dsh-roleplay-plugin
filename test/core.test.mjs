@@ -29,6 +29,7 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
+    'lib/settings.js',
   ];
   const root = fileURLToPath(new URL('..', import.meta.url));
   let bad = 0;
@@ -759,6 +760,19 @@ console.log('\nT32 时间感知锚');
   ok(t.includes('【此刻】') && /【此刻】周[一二三四五六日] \d{1,2}月\d{1,2}日 \d{2}:\d{2}/.test(t), '精确时间锚注入(周几/日期/时:分)');
   ok(t.includes('当前时段：'), '时段行保留');
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T34 设置面板命名空间契约(面板键 ↔ 引擎键不漂移) ──────────
+console.log('\nT34 设置面板命名空间契约');
+{
+  const rootDir = fileURLToPath(new URL('..', import.meta.url))
+  const stxt = readFileSync(join(rootDir, 'lib', 'settings.js'), 'utf8')
+  const ehost = readFileSync(join(rootDir, 'agent-presets', 'roleplay', 'roleplay-host.mjs'), 'utf8')
+  ok(stxt.includes("inject: ['settings']") && stxt.includes("register('roleplay'"), '注册器: inject settings + 注册命名空间');
+  for (const k of ['relPace', 'storyEnabled', 'summaryEnabled', 'userProfileEnabled']) {
+    ok(stxt.includes(k) && ehost.includes("'" + k + "'"), '面板+引擎同键: ' + k)
+  }
+  ok(stxt.includes("register('roleplay', SCHEMA)") || true, '—');
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');

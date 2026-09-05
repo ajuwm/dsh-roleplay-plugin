@@ -37,10 +37,10 @@ export function apply(ctx, config) {
     // ── DSH 插件设置命名空间「roleplay」双通道同步 ────────────────────────
     // settings 是可选宿主服务（ctx.get 不阻塞挂载）：存在则与 DSH 右侧「插件设置」
     // 面板双向同步（角色扮演卡），不存在则退化为仅用 state.settings（侧栏仍可编辑）。
-    // 迁移到面板的字段只有这 7 项；scriptStart/scriptEnd 及角色字段留在侧栏。
+    // 迁移到面板的字段；scriptStart/scriptEnd 及角色字段留在侧栏。
     // DSH 插件设置命名空间「roleplay」双通道同步（仅恋爱向使用；friend/oc 独立预设不共享面板设置）
     const settingsSvc = STYLE === 'love' ? ctx.get('settings') : undefined
-    const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW']
+    const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW', 'relPace', 'storyEnabled', 'summaryEnabled', 'userProfileEnabled']
     function pickMigrated(obj) {
       const out = {}
       if (!obj) return out
@@ -66,6 +66,10 @@ export function apply(ctx, config) {
       if (patch.statsEnabled !== undefined) out.statsEnabled = !!patch.statsEnabled
       if (patch.difficulty === 1 || patch.difficulty === 2 || patch.difficulty === 3) out.difficulty = patch.difficulty
       if (patch.relationEnabled !== undefined) out.relationEnabled = !!patch.relationEnabled
+      if (patch.relPace === 'slow' || patch.relPace === 'normal' || patch.relPace === 'fast') out.relPace = patch.relPace
+      if (patch.storyEnabled !== undefined) out.storyEnabled = !!patch.storyEnabled
+      if (patch.summaryEnabled !== undefined) out.summaryEnabled = !!patch.summaryEnabled
+      if (patch.userProfileEnabled !== undefined) out.userProfileEnabled = !!patch.userProfileEnabled
       return out
     }
     let nsSynced = false

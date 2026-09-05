@@ -2,6 +2,13 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.4.6] - 功能开关进 DSH「设置 → 插件 → 插件配置」
+- 新增注册行 `roleplay-settings`(inject settings,独立行——失败不影响主桥接):注册 `roleplay` 设置命名空间 schema(11 键:心跳/叙述风格/难度/属性开关/亲密度开关/亲密度进度/看桌面/截图宽度/剧情档案/剧情概况/用户档案)
+- 效果:DSH 设置页「插件配置」列表出现「角色扮演」卡片(与 终端/Agent 循环/网页搜索 同款),开关全量可改
+- 引擎白名单扩容(MIGRATED_KEYS/sanitizeMigrated/pickMigrated 增加 relPace/storyEnabled/summaryEnabled/userProfileEnabled):面板改动 → settings/updated → 全键回写 state.settings;侧栏改动 → mirror 回命名空间(双向)
+- 侧栏设置保留(冗余入口,同源);新增 T34(注册器/键集不漂移断言)——全量 **175/175**
+- 注:面板卡片并非 v1.4.0 移除的那张 client 注入卡(那条路废弃),而是 rc.2 原生 settings 命名空间机制;升到该版本后旧"无法读取"卡片误区自然消失
+
 ## [1.4.5] - 分发迁移:官方 `dsh plugin add`(bundle 化)
 - 仓库根成为 npm 包(`@ajuwm/dsh-roleplay-plugin`):声明 `dsh.bundle.patch` + `dsh.client` → `dsh plugin --profile <p> add github:ajuwm/dsh-roleplay-plugin` 一条命令完成安装/更新/卸载(自动 reconcile 进 `dsh.profile.bundles`)
 - 桥接(host/browser halves)移入包根 `lib/`;浏览器 half 走包 `dsh.client` 声明,不再需要手写 `cordis.patch.yml`
