@@ -809,7 +809,11 @@ console.log('\nT35 对话侧边栏');
   ok(r4.messages.length === 0, 'since=lastSeq 无增量');
   // 引擎集成: 发送 → 会话事件可读(同一会话流)
   const b = await boot();
+  const pk0 = await b.svc.peek();
+  ok(pk0 && pk0.enabled === false && pk0.name === null, 'peek: 未开演(enabled=false)');
   await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const pk1 = await b.svc.peek();
+  ok(pk1 && pk1.name === '甲' && pk1.enabled === true, 'peek: 开演后返回角色名/开演状态');
   const s1 = await b.svc.chatSend({ sessionId: 't-session', text: '在吗' });
   ok(s1 && s1.ok === true, 'chatSend 成功入会话');
   const p1 = await b.svc.chatPoll({ sessionId: 't-session', since: 0 });

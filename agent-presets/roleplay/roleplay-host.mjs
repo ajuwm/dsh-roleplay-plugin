@@ -2388,6 +2388,15 @@ export function apply(ctx, config) {
           hbDiag,
         }
       },
+      // 轻量信息(对话侧栏目标列表):不触发心跳/衰减等副作用,只读当前状态
+      peek: async () => {
+        if (!stateLoaded) { try { await ensureLoaded() } catch (e) {} }
+        return {
+          name: state.character ? state.character.name : null,
+          enabled: !!(state.enabled && state.character),
+          dataRoot: REL_ROOT,
+        }
+      },
       // 对话侧边栏：向角色发一条消息（走真实会话，与主对话区同一会话流）
       chatSend: async (args) => {
         adoptAgent(args)
