@@ -70,7 +70,7 @@ console.log('\nT0b PS 语法门 (pet/*.ps1)');
   for (const f of psFiles) {
     const target = join(root2, f);
     try {
-      const script = "$b=[System.IO.File]::ReadAllBytes('" + target.replace(/'/g, "''") + "');$bom=New-Object byte[] 3;$bom[0]=0xEF;$bom[1]=0xBB;$bom[2]=0xBF;$tmp=Join-Path $env:TEMP ('rp-syn-'+[guid]::NewGuid().ToString('N')+'.ps1');$all=New-Object byte[] ($b.Length+3);[Array]::Copy($bom,0,$all,0,3);[Array]::Copy($b,0,$all,3,$b.Length);[IO.File]::WriteAllBytes($tmp,$all);$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$t,[ref]$e)|Out-Null;Remove-Item $tmp -Force;if($e.Count){Write-Output ('ERR:'+$e[0].Extent.StartLineNumber+':'+$e[0].Message);exit 1}else{exit 0}";
+      const script = "$b=[System.IO.File]::ReadAllBytes('" + target.replace(/'/g, "''") + "');$hasBom=($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF);if(-not $hasBom){$bom=New-Object byte[] 3;$bom[0]=0xEF;$bom[1]=0xBB;$bom[2]=0xBF;$all=New-Object byte[] ($b.Length+3);[Array]::Copy($bom,0,$all,0,3);[Array]::Copy($b,0,$all,3,$b.Length)}else{$all=$b};$tmp=Join-Path $env:TEMP ('rp-syn-'+[guid]::NewGuid().ToString('N')+'.ps1');[IO.File]::WriteAllBytes($tmp,$all);$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$t,[ref]$e)|Out-Null;Remove-Item $tmp -Force;if($e.Count){Write-Output ('ERR:'+$e[0].Extent.StartLineNumber+':'+$e[0].Message);exit 1}else{exit 0}";
       const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
       if (r.status !== 0) {
         psBad++;

@@ -254,5 +254,7 @@ $pollTimer.Add_Tick({
 })
 $pollTimer.Start()
 
-[System.Windows.Application]::Current.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::Background)
-[System.Windows.Threading.Dispatcher]::Run()
+# ---------- main loop (与 pet-window 同款消息泵) ----------
+$app = New-Object System.Windows.Application
+Show-EmptyWin
+$app.Run()
