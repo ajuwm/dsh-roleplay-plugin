@@ -64,7 +64,8 @@ function New-NoteWin($note) {
   $null = $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
 
   $title = New-Object System.Windows.Controls.TextBlock
-  $title.Text = ([string]$note.pinned) ? '📌 ' : '📝 '
+  $title.Text = '📝 '
+  if ([bool]$note.pinned) { $title.Text = '📌 ' }
   $title.Text += '便利贴'
   $title.Foreground = New-Solid '#9AA1B0'
   $title.FontSize = 11

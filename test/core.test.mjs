@@ -60,6 +60,34 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
   ok(bad === 0, bad === 0 ? '全部 ' + SYNTAX_FILES.length + ' 个文件语法通过' : bad + ' 个文件语法错误');
 }
 
+// T0b PowerShell 脚本语法门(UTF-8 BOM 法: 无 BOM 会被 ANSI 解码误判, 先补 BOM 再解析)
+console.log('\nT0b PS 语法门 (pet/*.ps1)');
+{
+  const root2 = fileURLToPath(new URL('..', import.meta.url));
+  const psFiles = ['pet/pet-window.ps1', 'pet/note-window.ps1'];
+  let psBad = 0;
+  let psChecked = 0;
+  for (const f of psFiles) {
+    const target = join(root2, f);
+    try {
+      const script = "$b=[System.IO.File]::ReadAllBytes('" + target.replace(/'/g, "''") + "');$bom=New-Object byte[] 3;$bom[0]=0xEF;$bom[1]=0xBB;$bom[2]=0xBF;$tmp=Join-Path $env:TEMP ('rp-syn-'+[guid]::NewGuid().ToString('N')+'.ps1');$all=New-Object byte[] ($b.Length+3);[Array]::Copy($bom,0,$all,0,3);[Array]::Copy($b,0,$all,3,$b.Length);[IO.File]::WriteAllBytes($tmp,$all);$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$t,[ref]$e)|Out-Null;Remove-Item $tmp -Force;if($e.Count){Write-Output ('ERR:'+$e[0].Extent.StartLineNumber+':'+$e[0].Message);exit 1}else{exit 0}";
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
+      if (r.status !== 0) {
+        psBad++;
+        psChecked++;
+        failures.push('PS语法: ' + f);
+        console.log('  ❌ ' + f + ' → ' + String(r.stdout || r.stderr || '').slice(0, 300));
+      } else {
+        psChecked++;
+        console.log('  ✅ ' + f);
+      }
+    } catch (e) {
+      console.log('  ⚠ ' + f + ' 跳过(无法运行 pwsh): ' + String(e && e.message ? e.message : e));
+    }
+  }
+  ok(psBad === 0, psBad === 0 ? 'PS 脚本全部通过(' + psChecked + '/' + psFiles.length + ')' : psBad + ' 个 PS 脚本语法错误');
+}
+
 // 一次全新引擎实例 + 独立临时数据根（reuseRoot 传入时复用同一数据根，用于跨实例断言）
 async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reuseRoot = null) {
   const root = reuseRoot || mkdtempSync(join(tmpdir(), 'rp-test-'));

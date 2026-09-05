@@ -571,11 +571,12 @@ $moodTimer.Add_Tick({
       $el = New-Object System.Windows.Controls.ToolTip
       $el.Content = [string]$m.label
       $moodBadge.ToolTip = $el
-      $c = [System.Windows.Media.ColorConverter]::ConvertFromString(
-        switch ([string]$m.tone) {
-          'red' { '#E06A6A' } 'orange' { '#E0A050' } 'yellow' { '#DDC94E' }
-          'pink' { '#E88AA8' } default { '#4ED17E' }
-        })
+      $hex = '#4ED17E'
+      switch ([string]$m.tone) {
+        'red' { $hex = '#E06A6A' } 'orange' { $hex = '#E0A050' } 'yellow' { $hex = '#DDC94E' }
+        'pink' { $hex = '#E88AA8' }
+      }
+      $c = [System.Windows.Media.ColorConverter]::ConvertFromString($hex)
       $moodBadge.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(215, $c.R, $c.G, $c.B))
     }
   } catch { }
