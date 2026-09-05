@@ -15,6 +15,7 @@ import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
 import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
 import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
 import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
+import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -1186,6 +1187,17 @@ export function apply(ctx, config) {
       const mdToday = pad(now.getMonth() + 1) + '-' + pad(now.getDate())
       const todayAnn = ann.filter((a) => a.date && String(a.date).slice(5) === mdToday)
       if (todayAnn.length) parts.push('- 今天是' + todayAnn.map((a) => a.name).join('、') + '的日子，你记得：可以在开口时自然提起。')
+      // 生活小事件采样(确定性天气 + 按档位加权的事件池)
+      try {
+        const w = weatherOf(dayKey(now), state.character ? state.character.name : '')
+        if (w && w.line) parts.push('- ' + w.line)
+        const tier = {
+          stageTier: { stranger: 0, acquaintance: 1, friend: 2, close_friend: 3, special: 4 }[relationStage()] || 0,
+          favorTier: axisTier((state.relation || DEFAULT_RELATION).favor || 0),
+          heartTier: axisTier((state.relation || DEFAULT_RELATION).heart || 0),
+        }
+        for (const e of pickLifeEvents(hour, tier)) parts.push('- ' + e)
+      } catch (e) { /* 采样失败不影响心跳主流程 */ }
       parts.push('- 如果你心里有话想说、或想提醒用户（比如早点睡、记得吃东西），但不想打断他、也不必现在聊，可以写一张便签（调用 roleplay_note；需要到点提醒就填 remindMinutes），写完可以在回应里自然提一句「给你留了张便签」。')
       const isDiaryTime = hour === 23 && state.lastDiaryDay !== dayKey(now)
       if (isDiaryTime) parts.push('- 现在是深夜，回顾今天与用户的互动，以「' + state.character.name + '」的第一人称写今天的日记（调用 roleplay_diary 保存；若今天已写过则跳过）。')

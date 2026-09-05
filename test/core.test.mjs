@@ -35,6 +35,9 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/game-core.mjs',
     'agent-presets/roleplay-friend/lib/game-core.mjs',
     'agent-presets/roleplay-oc/lib/game-core.mjs',
+    'agent-presets/roleplay/lib/heartbeat-core.mjs',
+    'agent-presets/roleplay-friend/lib/heartbeat-core.mjs',
+    'agent-presets/roleplay-oc/lib/heartbeat-core.mjs',
     'agent-presets/roleplay/deskpet.js',
     'lib/index.js',
     'lib/client.js',
@@ -928,6 +931,27 @@ console.log('\nT37 小游戏');
   ok(q1 && q1.ok === true, 'gameQuit 成功');
   ok((await b.svc.gameState({ sessionId: 't-session' })) === null, '退出后无游戏');
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T38 心跳事件池: 天气确定性 + 档位门槛 ───
+console.log('\nT38 心跳事件池');
+{
+  const H = await import(new URL('../agent-presets/roleplay/lib/heartbeat-core.mjs', import.meta.url).href);
+  const w1 = H.weatherOf('2026-09-05', '流萤');
+  const w2 = H.weatherOf('2026-09-05', '流萤');
+  ok(w1.label === w2.label && w1.line === w2.line, '天气确定性(同日同角色恒定)');
+  ok(H.weatherOf('2026-09-06', '流萤').label === H.weatherOf('2026-09-06', '流萤').label, '次日仍确定性');
+  const always = { stageTier: 0, favorTier: 1, heartTier: 1 };
+  const lots = H.pickLifeEvents(14, always, () => 0.01);
+  ok(lots.length === 1, '低档全命中只有通用池 1 条(亲近/心动被门槛拦)');
+  const none = H.pickLifeEvents(14, always, () => 0.99);
+  ok(none.length === 0, '全未命中=空');
+  const low = H.pickLifeEvents(14, { stageTier: 0, favorTier: 1, heartTier: 1 }, () => 0.01);
+  ok(low.every((x) => !x.includes('外套') && !x.includes('新点心') && !x.includes('心跳')), '低好感无亲近/心动事件');
+  const mid = H.pickLifeEvents(14, { stageTier: 2, favorTier: 2, heartTier: 1 }, () => 0.01);
+  ok(mid.some((x) => ['笑', '点心', '肚子', '外套', '日程', '店'].some((k) => x.includes(k))), '朋友档出现亲近事件');
+  const heartOnly = H.pickLifeEvents(22, { stageTier: 0, favorTier: 1, heartTier: 3 }, () => 0.01);
+  ok(heartOnly.some((x) => x.includes('心跳') || x.includes('失眠') || x.includes('便签') || x.includes('镜子')), '心动三档出现心动事件(好感门槛不拦心动池)');
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
