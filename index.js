@@ -115,24 +115,19 @@ export default {
     async function dispatch(endpoint, payload) {
       payload = (payload && typeof payload === 'object') ? payload : {}
       if (endpoint === 'settings-read') {
-        // settings 服务后续波次就绪: 每次调用实时解析(注册器行已证明其最终可用)
-        let svc = undefined
-        try { svc = ctx.get('settings') } catch (e) { /* 未就绪 */ }
-        return { ok: true, value: svc !== undefined ? svc.get('roleplay') : undefined }
+        return { ok: true, value: settingsSvc !== undefined ? settingsSvc.get('roleplay') : undefined }
       }
       if (endpoint === 'settings-write') {
         const patch = payload.settings
-        let svc = undefined
-        try { svc = ctx.get('settings') } catch (e) { /* 未就绪 */ }
-        if (svc === undefined || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
+        if (settingsSvc === undefined || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
           return { ok: false, error: { code: 'bad-settings', message: 'settings 必须是一个对象。' } }
         }
         try {
-          await svc.update('roleplay', patch)
+          await settingsSvc.update('roleplay', patch)
         } catch (error) {
           return { ok: false, error: { code: 'settings-error', message: error instanceof Error ? error.message : String(error) } }
         }
-        return { ok: true, value: svc.get('roleplay') }
+        return { ok: true, value: settingsSvc.get('roleplay') }
       }
       if (agents === undefined || agentPresets === undefined) {
         return { ok: false, error: { code: 'roleplay-unavailable', message: '当前环境缺少角色扮演桥接服务。' } }
