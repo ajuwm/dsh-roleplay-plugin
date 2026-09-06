@@ -1,6 +1,7 @@
-# roleplay note window (WPF) - sticky-note windows pinned to the desktop at any position.
+﻿# roleplay note window (WPF) - sticky-note windows pinned to the desktop at any position.
 # Architecture: polls the DSH bridge /roleplay/notes-list (POST), keeps one frameless
 # paper window per visible note, reports drag positions via /roleplay/notes-ack pos.
+# 视觉: 奶油便利贴 + 顶部胶带 + 深色文字(不用 emoji, 避免 PS5.1 渲染乱码)。
 # Usage: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File note-window.ps1 -Port <dsh-port>
 param(
   [int]$Port = 3080,
@@ -30,7 +31,7 @@ $script:wins = New-Object 'System.Collections.Generic.Dictionary[string,object]'
 $script:noteRefs = New-Object 'System.Collections.Generic.Dictionary[string,object]'
 $script:emptyWin = $null
 
-# ---------- note window ----------
+# ---------- note window (便利贴) ----------
 function New-NoteWin($note) {
   if ($script:wins.ContainsKey([string]$note.id)) { return }
 
@@ -42,79 +43,127 @@ function New-NoteWin($note) {
   $win.ShowInTaskbar = $false
   $win.ResizeMode = [System.Windows.ResizeMode]::NoResize
   $win.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
-  $win.Width = 280
-  $win.Height = 150
-  $win.Opacity = 0.97
+  $win.Width = 300
+  $win.Height = 172
+  $win.Opacity = 0.98
 
-  $border = New-Object System.Windows.Controls.Border
-  $border.CornerRadius = New-Object System.Windows.CornerRadius(12)
-  $border.BorderThickness = New-Object System.Windows.Thickness(1)
-  $border.Background = New-Solid '#1F232CEB'
-  $border.BorderBrush = New-Solid '#2A3140AA'
-  $border.Margin = New-Object System.Windows.Thickness(0)
+  $hostGrid = New-Object System.Windows.Controls.Grid
 
-  $grid = New-Object System.Windows.Controls.Grid
-  $grid.Margin = New-Object System.Windows.Thickness(12, 10, 10, 8)
+  # 纸张: 奶油色圆角 + 淡棕描边 + 纸影
+  $paper = New-Object System.Windows.Controls.Border
+  $paper.CornerRadius = New-Object System.Windows.CornerRadius(10)
+  $paper.BorderThickness = New-Object System.Windows.Thickness(1)
+  $paper.Background = New-Solid '#FFF6D8'
+  $paper.BorderBrush = New-Solid '#E6D9AE'
+  $shadow = New-Object System.Windows.Media.Effects.DropShadowEffect
+  $shadow.BlurRadius = 16
+  $shadow.ShadowDepth = 3
+  $shadow.Opacity = 0.35
+  $shadow.Color = [System.Windows.Media.Colors]::Black
+  $paper.Effect = $shadow
+  $null = $hostGrid.Children.Add($paper)
 
-  # header row: pin glyph + title + buttons
-  $head = New-Object System.Windows.Controls.StackPanel
-  $head.Orientation = [System.Windows.Controls.Orientation]::Horizontal
-  $head.Margin = New-Object System.Windows.Thickness(0, 0, 0, 6)
-  $null = $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
-  $null = $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
-  $null = $grid.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition))
+  # 顶部胶带(半透明, 微微倾斜)
+  $tape = New-Object System.Windows.Controls.Border
+  $tape.Width = 132
+  $tape.Height = 24
+  $tape.CornerRadius = New-Object System.Windows.CornerRadius(3)
+  $tape.Background = New-Solid '#F2C978'
+  $tape.Opacity = 0.75
+  $tape.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+  $tape.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+  $tape.Margin = New-Object System.Windows.Thickness(0, -10, 0, 0)
+  $tapeRotate = New-Object System.Windows.Media.RotateTransform
+  $tapeRotate.Angle = -3
+  $tape.RenderTransform = $tapeRotate
+  $null = $hostGrid.Children.Add($tape)
+
+  # 内容区
+  $content = New-Object System.Windows.Controls.StackPanel
+  $content.Margin = New-Object System.Windows.Thickness(18, 26, 18, 14)
+
+  # 标题行: 便签 + 置顶标记 + 右上操作按钮
+  $head = New-Object System.Windows.Controls.Grid
+  $colT = New-Object System.Windows.Controls.ColumnDefinition
+  $colB = New-Object System.Windows.Controls.ColumnDefinition
+  $colB.Width = [System.Windows.GridLength]::Auto
+  $null = $head.ColumnDefinitions.Add($colT)
+  $null = $head.ColumnDefinitions.Add($colB)
 
   $title = New-Object System.Windows.Controls.TextBlock
-  $title.Text = '📝 '
-  if ([bool]$note.pinned) { $title.Text = '📌 ' }
-  $title.Text += '便利贴'
-  $title.Foreground = New-Solid '#9AA1B0'
+  $title.Text = '便签'
+  $title.Foreground = New-Solid '#8A7B52'
   $title.FontSize = 11
-  $title.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
+  $title.FontWeight = [System.Windows.FontWeights]::Medium
   $title.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
   $null = $head.Children.Add($title)
 
+  $btns = New-Object System.Windows.Controls.StackPanel
+  $btns.Orientation = [System.Windows.Controls.Orientation]::Horizontal
   $btnRead = New-Object System.Windows.Controls.Button
-  $btnRead.Content = [char]0x2714
-  $btnRead.Width = 24; $btnRead.Height = 22
+  $btnRead.Content = [char]0x2713
+  $btnRead.Width = 24; $btnRead.Height = 24
   $btnRead.Background = [System.Windows.Media.Brushes]::Transparent
   $btnRead.BorderThickness = New-Object System.Windows.Thickness(0)
-  $btnRead.Foreground = New-Solid '#8FA8C8'
-  $btnRead.FontSize = 12
-  $null = $head.Children.Add($btnRead)
+  $btnRead.Foreground = New-Solid '#6F8F6F'
+  $btnRead.FontSize = 14
+  $btnRead.ToolTip = '已读'
+  $null = $btns.Children.Add($btnRead)
 
   $btnDel = New-Object System.Windows.Controls.Button
-  $btnDel.Content = [char]0x2715
-  $btnDel.Width = 24; $btnDel.Height = 22
+  $btnDel.Content = [char]0x00D7
+  $btnDel.Width = 24; $btnDel.Height = 24
   $btnDel.Background = [System.Windows.Media.Brushes]::Transparent
   $btnDel.BorderThickness = New-Object System.Windows.Thickness(0)
-  $btnDel.Foreground = New-Solid '#C87F7F'
-  $btnDel.FontSize = 12
-  $btnDel.Margin = New-Object System.Windows.Thickness(4, 0, 0, 0)
-  $null = $head.Children.Add($btnDel)
+  $btnDel.Foreground = New-Solid '#C07969'
+  $btnDel.FontSize = 15
+  $btnDel.Margin = New-Object System.Windows.Thickness(2, 0, 0, 0)
+  $btnDel.ToolTip = '删除'
+  $null = $btns.Children.Add($btnDel)
 
-  $null = $grid.Children.Add($head)
+  [System.Windows.Controls.Grid]::SetColumn($btns, 1)
+  $null = $head.Children.Add($btns)
+  $null = $content.Children.Add($head)
 
+  # 正文
   $txt = New-Object System.Windows.Controls.TextBlock
   $txt.Text = [string]$note.text
-  $txt.Foreground = New-Solid '#F0F1F4'
-  $txt.FontSize = 13
+  $txt.Foreground = New-Solid '#4A3F28'
+  $txt.FontSize = 14
   $txt.TextWrapping = [System.Windows.TextWrapping]::Wrap
-  $txt.Margin = New-Object System.Windows.Thickness(0, 2, 0, 4)
-  [System.Windows.Controls.Grid]::SetRow($txt, 1)
-  $null = $grid.Children.Add($txt)
+  $txt.Margin = New-Object System.Windows.Thickness(0, 6, 0, 4)
+  $txt.MaxHeight = 66
+  $null = $content.Children.Add($txt)
 
+  # 底部: 时间 + 到期
   $meta = New-Object System.Windows.Controls.TextBlock
   $meta.Text = ([string]$note.at).Substring(0, [Math]::Min(16, ([string]$note.at).Length))
-  if ($note.expiresAt) { $meta.Text += ' · ⏰ 到期提醒' }
-  $meta.Foreground = New-Solid '#8A92A2'
+  if ($note.expiresAt) { $meta.Text += '  ·  到期提醒' }
+  $meta.Foreground = New-Solid '#A0916C'
   $meta.FontSize = 10
-  $meta.Margin = New-Object System.Windows.Thickness(0, 2, 0, 0)
-  [System.Windows.Controls.Grid]::SetRow($meta, 2)
-  $null = $grid.Children.Add($meta)
+  $meta.Margin = New-Object System.Windows.Thickness(0, 4, 0, 0)
+  $null = $content.Children.Add($meta)
 
-  $border.Child = $grid
-  $win.Content = $border
+  $null = $hostGrid.Children.Add($content)
+  $win.Content = $hostGrid
+
+  # 置顶: 胶带换粉 + 标题加标记; 已读/到期在轮询里更新
+  if ([bool]$note.pinned) {
+    $tape.Background = New-Solid '#EFAFCE'
+    $title.Text = '便签 · 置顶'
+  }
+  if ([bool]$note.read) {
+    $hostGrid.Opacity = 0.55
+  }
+  $isDue = $false
+  if ($note.expiresAt -and [long]$note.expiresAt -gt 0 -and [long]$note.expiresAt -le [long]([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())) {
+    $isDue = $true
+  }
+  if ($isDue) {
+    $paper.BorderBrush = New-Solid '#E0A050'
+    $paper.Background = New-Solid '#FFF0CE'
+    $tape.Background = New-Solid '#E8B060'
+  }
 
   # initial position: saved pos, else scatter along the right edge
   $work = [System.Windows.SystemParameters]::WorkArea
@@ -127,9 +176,7 @@ function New-NoteWin($note) {
     $win.Top = $work.Top + 60 + ($i % 5) * 46
   }
 
-  # drag: report position (throttled) / click actions.
-  # 注意: PS 事件处理器在触发时按"脚本级作用域"解析变量——函数局部变量($win/$dragId/$border/$txt)
-  # 在事件触发时已不可见, 会导致交互失效。因此一律经 $this.Tag + $script:noteRefs 字典访问。
+  # drag / actions: 事件处理器只引用脚本级状态($this.Tag + $script:noteRefs), 不引用函数局部变量
   $id = [string]$note.id
   $win.Tag = $id
   $btnRead.Tag = $id
@@ -153,10 +200,7 @@ function New-NoteWin($note) {
     $rid = $this.Tag
     $null = Post-Json '/notes-ack' @{ id = $rid; action = 'read' }
     $ref = $script:noteRefs[$rid]
-    if ($ref) {
-      $ref.border.Background = New-Solid '#1E232B88'
-      $ref.txt.Foreground = New-Solid '#9AA1B0'
-    }
+    if ($ref) { $ref.host.Opacity = 0.55 }
   })
   $btnDel.Add_Click({
     $did = $this.Tag
@@ -173,8 +217,8 @@ function New-NoteWin($note) {
     $script:noteRefs.Remove($cid)
   })
 
-  $script:wins[$id] = @{ win = $win; border = $border; txt = $txt; meta = $meta; note = $note; read = [bool]$note.read }
-  $script:noteRefs[$id] = @{ win = $win; border = $border; txt = $txt }
+  $script:wins[$id] = @{ win = $win; paper = $paper; host = $hostGrid; txt = $txt; note = $note; read = [bool]$note.read }
+  $script:noteRefs[$id] = @{ win = $win; paper = $paper; txt = $txt; host = $hostGrid; title = $title }
   $win.Show()
 }
 
@@ -198,33 +242,41 @@ function Show-EmptyWin {
   $win.ShowInTaskbar = $false
   $win.ResizeMode = [System.Windows.ResizeMode]::NoResize
   $win.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
-  $win.Width = 220
-  $win.Height = 96
-  $win.Opacity = 0.92
+  $win.Width = 230
+  $win.Height = 104
+  $win.Opacity = 0.95
   $work = [System.Windows.SystemParameters]::WorkArea
   $win.Left = $work.Right - $win.Width - 24
   $win.Top = $work.Top + 24
   $b = New-Object System.Windows.Controls.Border
-  $b.CornerRadius = New-Object System.Windows.CornerRadius(12)
+  $b.CornerRadius = New-Object System.Windows.CornerRadius(10)
   $b.BorderThickness = New-Object System.Windows.Thickness(1)
-  $b.Background = New-Solid '#1F232CAA'
-  $b.BorderBrush = New-Solid '#2A314088'
+  $b.Background = New-Solid '#FFF6D8'
+  $b.BorderBrush = New-Solid '#E6D9AE'
+  $shadow = New-Object System.Windows.Media.Effects.DropShadowEffect
+  $shadow.BlurRadius = 14
+  $shadow.ShadowDepth = 2
+  $shadow.Opacity = 0.3
+  $shadow.Color = [System.Windows.Media.Colors]::Black
+  $b.Effect = $shadow
   $st = New-Object System.Windows.Controls.StackPanel
-  $st.Margin = New-Object System.Windows.Thickness(12)
+  $st.Margin = New-Object System.Windows.Thickness(14)
   $t1 = New-Object System.Windows.Controls.TextBlock
-  $t1.Text = '📝 便利贴'
-  $t1.Foreground = New-Solid '#9AA1B0'
+  $t1.Text = '便签'
+  $t1.Foreground = New-Solid '#8A7B52'
   $t1.FontSize = 12
+  $t1.FontWeight = [System.Windows.FontWeights]::Medium
   $null = $st.Children.Add($t1)
   $t2 = New-Object System.Windows.Controls.TextBlock
-  $t2.Text = '暂无便签 · 她会在想你时给你留纸条'
-  $t2.Foreground = New-Solid '#7A8290'
+  $t2.Text = '暂无便签 - 她会在想你时给你留纸条'
+  $t2.Foreground = New-Solid '#A0916C'
   $t2.FontSize = 10
-  $t2.Margin = New-Object System.Windows.Thickness(0, 4, 0, 0)
+  $t2.Margin = New-Object System.Windows.Thickness(0, 5, 0, 0)
+  $t2.TextWrapping = [System.Windows.TextWrapping]::Wrap
   $null = $st.Children.Add($t2)
   $b.Child = $st
   $win.Content = $b
-  $win.Add_MouseLeftButtonDown({ $win.DragMove() })
+  $win.Add_MouseLeftButtonDown({ $this.DragMove() })
   $script:emptyWin = $win
   $win.Show()
 }
@@ -255,15 +307,13 @@ $pollTimer.Add_Tick({
     $o = $script:wins[$id]
     $o.note = $n
     $o.txt.Text = [string]$n.text
-    $o.meta.Text = ([string]$n.at).Substring(0, [Math]::Min(16, ([string]$n.at).Length))
-    if ($n.expiresAt) { $o.meta.Text += ' · ⏰ 到期提醒' }
     if ([bool]$n.read -and -not $o.read) {
       $o.read = $true
-      $o.border.Background = New-Solid '#1E232B88'
-      $o.txt.Foreground = New-Solid '#9AA1B0'
+      $o.host.Opacity = 0.55
     }
     if ([bool]$n.reminded) {
-      $o.border.BorderBrush = New-Solid '#C8934AE6'
+      $o.paper.BorderBrush = New-Solid '#E0A050'
+      $o.paper.Background = New-Solid '#FFF0CE'
     }
   }
   foreach ($k in @($script:wins.Keys)) {

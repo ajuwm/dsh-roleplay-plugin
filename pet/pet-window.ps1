@@ -155,17 +155,21 @@ $img.Effect = $eff
 [System.Windows.Controls.Grid]::SetRow($img, 1)
 $null = $grid.Children.Add($img)
 
-# 心情角标: 立绘右上角小徽章(读 /pet/mood, 每 10s 刷新)
+# 状态角标: 立绘右上角小徽章(读 /pet/mood 的 label 文本, 每 10s 刷新; 不用 emoji, 避免显示乱码)
 $moodBadge = New-Object System.Windows.Controls.Border
-$moodBadge.CornerRadius = New-Object System.Windows.CornerRadius(999)
-$moodBadge.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(215, 24, 26, 34))
-$moodBadge.Padding = New-Object System.Windows.Thickness(7, 2, 7, 2)
+$moodBadge.CornerRadius = New-Object System.Windows.CornerRadius(10)
+$moodBadge.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(244, 30, 34, 43))
+$moodBadge.BorderBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(90, 255, 255, 255))
+$moodBadge.BorderThickness = New-Object System.Windows.Thickness(1)
+$moodBadge.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
 $moodBadge.Margin = New-Object System.Windows.Thickness(0, 6, 10, 0)
 $moodBadge.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
 $moodBadge.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
 $moodText = New-Object System.Windows.Controls.TextBlock
-$moodText.FontSize = 12
-$moodText.Text = '💤'
+$moodText.FontSize = 11
+$moodText.FontWeight = [System.Windows.FontWeights]::Medium
+$moodText.Foreground = [System.Windows.Media.Brushes]::White
+$moodText.Text = '未开演'
 $moodBadge.Child = $moodText
 [System.Windows.Controls.Grid]::SetRow($moodBadge, 1)
 $null = $grid.Children.Add($moodBadge)
@@ -559,7 +563,7 @@ $bubblePollTimer.Add_Tick({
 })
 $bubblePollTimer.Start()
 
-# ---------- mood badge poll（心情角标: 读 /pet/mood） ----------
+# ---------- mood badge poll（状态角标: 读 /pet/mood 的 label 文字, 不显示 emoji 防乱码） ----------
 $moodTimer = New-Object System.Windows.Threading.DispatcherTimer
 $moodTimer.Interval = [TimeSpan]::FromSeconds(10)
 $moodTimer.Add_Tick({
@@ -567,17 +571,20 @@ $moodTimer.Add_Tick({
     $resp = Get-Json '/mood'
     if ($resp -and $resp.ok -and $resp.mood) {
       $m = $resp.mood
-      if ($moodText.Text -ne [string]$m.emoji) { $moodText.Text = [string]$m.emoji }
+      $label = [string]$m.label
+      if (-not $label) { $label = [string]$m.emoji }
+      if ($moodText.Text -ne $label) { $moodText.Text = $label }
       $el = New-Object System.Windows.Controls.ToolTip
       $el.Content = [string]$m.label
       $moodBadge.ToolTip = $el
-      $hex = '#4ED17E'
+      $hexTxt = '#C8CCD4'
       switch ([string]$m.tone) {
-        'red' { $hex = '#E06A6A' } 'orange' { $hex = '#E0A050' } 'yellow' { $hex = '#DDC94E' }
-        'pink' { $hex = '#E88AA8' }
+        'red' { $hexTxt = '#E88A8A' } 'orange' { $hexTxt = '#E8B088' } 'yellow' { $hexTxt = '#E4D07C' }
+        'pink' { $hexTxt = '#EFA4BC' } 'green' { $hexTxt = '#93D4A0' }
       }
-      $c = [System.Windows.Media.ColorConverter]::ConvertFromString($hex)
-      $moodBadge.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(215, $c.R, $c.G, $c.B))
+      $moodText.Foreground = [System.Windows.Media.Brushes]::White
+      $c = [System.Windows.Media.ColorConverter]::ConvertFromString($hexTxt)
+      $moodText.Foreground = New-Object System.Windows.Media.SolidColorBrush($c)
     }
   } catch { }
 })
