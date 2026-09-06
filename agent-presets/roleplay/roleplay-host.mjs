@@ -2642,14 +2642,20 @@ export function apply(ctx, config) {
 
     // ==================== 事件监听 ====================
 
-    ctx.on('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
+    ctx.on('agent/pre-step', async ({ agent, messages: claimedMessages, turn, step, signal }, next) => {
+      let decision = null
       try {
         if (!selfAgent && agent) selfAgent = agent
         await ensureLoaded()
-        const decision = await next()
-        // 防御: DSH 不同版本下 next() 可能返回 undefined/空(钩子链末端的合法情况),
-        // 直接原样透传, 绝不访问其属性(否则整轮报 "Cannot read properties of undefined")
-        if (decision === undefined || decision === null) return undefined
+        decision = await next()
+        // DSH waterfall 契约: 本钩子(prepend)是链的最外层, 其返回值就是整条链的结果,
+        // agent-loop 拿到结果后直接读 decision.kind。绝不可返回 undefined ——
+        // 否则 DSH 会报 "Cannot read properties of undefined (reading 'kind')" 整轮失败,
+        // 并且会把下游的真实错误掩盖成同一个笼统信息(2026-09-06 历史事故复现)。
+        if (decision === undefined || decision === null) {
+          const keep = Array.isArray(claimedMessages) ? claimedMessages : []
+          return { kind: 'enter', messages: keep }
+        }
         if (decision.kind === 'reject' || (signal && signal.aborted)) return decision
         const messages = decision.messages || []
         const userTexts = messages.filter((m) => m && m.role === 'user' && m.content).map((m) => m.content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ')).join(' ')
@@ -2674,9 +2680,13 @@ export function apply(ctx, config) {
         kept.push(makeUserMessage(text, 'ctx'))
         return { kind: 'enter', messages: kept }
       } catch (e) {
-        // 绝不让我们的钩子异常拖垮整轮(记录堆栈便于修复)
+        // 绝不让我们的钩子异常拖垮整轮(记录堆栈便于修复)。与返回 undefined 不同:
+        // 这里退回"原样进入"决策, 让已认领的用户消息照常送达模型(不重发、不丢失),
+        // 同时完整堆栈打到 DSH 控制台, 避免错误被 agent-loop 的 decision.kind 掩盖。
         console.error('[roleplay] agent/pre-step failed:', e && e.stack ? e.stack : e)
-        return undefined
+        if (decision && typeof decision === 'object' && typeof decision.kind === 'string') return decision
+        const keep = Array.isArray(claimedMessages) ? claimedMessages : []
+        return { kind: 'enter', messages: keep }
       }
     }, { prepend: true })
 
@@ -2792,10 +2802,15 @@ export function apply(ctx, config) {
         if (!text) return { ok: false, message: '消息不能为空。' }
         // 以普通用户消息发送（无 rp-/plugin 标记）：桌面对话与主对话区同流，
         // 引擎按真实用户互动处理（触摸/金币），侧边栏按普通用户气泡显示。
+        // ⚠️ source 字段是 DSH 消息契约：缺 source 会让 agent/pre-step 链上的
+        // dsh-repeat-tool-reminder / dsh-session-reference 读 message.source.kind
+        // 直接抛 "Cannot read properties of undefined (reading 'kind')" → 整轮失败
+        // (2026-09-06 实测: 侧栏 chatSend 消息全部红徽标, 桌宠消息带 source 则正常)。
         const message = {
           id: 'chat-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
           role: 'user',
           content: [{ type: 'text', text }],
+          source: { kind: 'user' },
         }
         try {
           agent.send(message, 'next-turn', true)

@@ -109,9 +109,10 @@ async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reu
   const root = reuseRoot || mkdtempSync(join(tmpdir(), 'rp-test-'));
   if (!reuseRoot) mkdirSync(join(root, dataRoot), { recursive: true });
   if (seedChar) writeFileSync(join(root, dataRoot, 'character.json'), JSON.stringify(seedChar));
-  const captured = { tools: {}, svc: null, sections: [], events: {} };
+  const captured = { tools: {}, svc: null, sections: [], events: {}, sent: [] };
   const fake = { id: 't-session', session: { events: [], seq: 0 } };
   fake.send = function (message) {
+    captured.sent.push(message);
     const ev = {
       seq: ++fake.session.seq,
       type: message && message.role === 'user' ? 'user/message' : 'assistant/message',
@@ -872,12 +873,43 @@ console.log('\nT35 对话侧边栏');
   ok(pk1 && pk1.name === '甲' && pk1.enabled === true, 'peek: 开演后返回角色名/开演状态');
   const s1 = await b.svc.chatSend({ sessionId: 't-session', text: '在吗' });
   ok(s1 && s1.ok === true, 'chatSend 成功入会话');
+  const lastSent = b.captured.sent[b.captured.sent.length - 1];
+  ok(lastSent && lastSent.source && lastSent.source.kind === 'user', 'chatSend 消息必带 source{kind:user}(缺 source 会令 DSH pre-step 链读 undefined.kind 崩成红徽标)');
   const p1 = await b.svc.chatPoll({ sessionId: 't-session', since: 0 });
   ok(p1 && p1.messages.some((m) => m.role === 'user' && m.text === '在吗' && m.plugin === false), 'chatPoll 读到用户消息(非插件标记)');
   const h1 = await b.svc.chatHistory({ sessionId: 't-session', limit: 10 });
   ok(h1 && Array.isArray(h1.messages) && h1.messages.length >= 1, 'chatHistory 返回历史');
   const s2 = await b.svc.chatSend({ sessionId: 't-session', text: '   ' });
   ok(s2 && s2.ok === false, '空消息被拒');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T42 pre-step 钩子契约: 下游 undefined/抛错绝不整轮失败, 绝不返回 undefined ───
+console.log('\nT42 pre-step 钩子契约');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const hooks = b.captured.events['agent/pre-step'] || [];
+  const h = hooks[0];
+  ok(typeof h === 'function', '捕获 pre-step 钩子');
+  const signal = new AbortController().signal;
+  const agent = { id: 't-session' };
+  const enterMsg = { id: 'chat-t1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } };
+  const payload = { agent, turn: 1, step: 1, signal, messages: [enterMsg] };
+  // 1) 下游返回 undefined(异常钩子): 必须兜底为合法 enter 决策, 绝不透传 undefined
+  const r1 = await h(payload, async () => undefined);
+  ok(r1 && typeof r1 === 'object' && r1.kind === 'enter', 'next()=undefined → 兜底 enter(不整轮红徽标)');
+  ok(Array.isArray(r1.messages) && r1.messages.length === 1 && r1.messages[0].id === 'chat-t1', '兜底决策保留已认领消息');
+  // 2) 下游抛错: 同样兜底且消息保留(真实原因打到控制台堆栈)
+  const r2 = await h(payload, async () => { throw new Error('downstream-booms') });
+  ok(r2 && typeof r2 === 'object' && r2.kind === 'enter', 'next() 抛错 → 兜底 enter(不整轮红徽标)');
+  ok(Array.isArray(r2.messages) && r2.messages.length === 1, '抛错兜底也保留已认领消息');
+  // 3) 正常路径: 原样返回下游决策
+  const r3 = await h(payload, async () => ({ kind: 'enter', messages: [enterMsg] }));
+  ok(r3 && r3.kind === 'enter' && r3.messages.length === 1, '正常路径透传下游决策');
+  // 4) reject 透传
+  const r4 = await h(payload, async () => ({ kind: 'reject', messages: [] }));
+  ok(r4 && r4.kind === 'reject', 'reject 决策原样透传');
   rmSync(b.root, { recursive: true, force: true });
 }
 
