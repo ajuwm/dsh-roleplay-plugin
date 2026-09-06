@@ -9,6 +9,12 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
+# 单实例互斥: 防止 DSH 重启后旧窗口进程(孤儿)与新进程并存 → 重复立绘窗口
+$mutex = New-Object System.Threading.Mutex($false, 'Local\DSHRoleplayPetWindow')
+$hasLock = $false
+try { $hasLock = $mutex.WaitOne(0) } catch { $hasLock = $true }
+if (-not $hasLock) { exit }
+
 $base = "http://127.0.0.1:$Port/pet"
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:cfg = $null

@@ -34,6 +34,8 @@ module.exports = {
     let targetSessionId = null
     let petProc = null
     let noteProc = null
+    let petLaunching = false
+    let noteLaunching = false
     let pending = null
     let seq = 0
     let petEnabled = true
@@ -231,31 +233,36 @@ module.exports = {
     ctx.interval(() => { drain() }, 300)
 
     async function startPet() {
-      if (petProc) return
-      let exe = 'powershell.exe'
-      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
-      const dir = petDir()
-      const script = SCRIPT()
-      const image = IMAGE()
-      console.error('[deskpet] startPet dir=' + dir + ' script=' + script + ' image=' + image + ' port=' + PORT)
-      const proc = subprocess.spawn({
-        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script, '-Image', image, '-Name', '\u684c\u5ba0', '-Port', String(PORT)],
-        cwd: dir,
-        stdio: {
-          stdin: 'ignore',
-          stdout: { collect: { maxBytes: 8192 } },
-          stderr: { collect: { maxBytes: 8192 } },
-        },
-        graceMs: 3000,
-      })
-      petProc = proc
-      proc.done.then((outcome) => {
-        console.log('[deskpet] window exited', JSON.stringify(outcome))
-        if (petProc === proc) petProc = null
-      }).catch((e) => {
-        console.error('[deskpet] window spawn failed', e)
-        if (petProc === proc) petProc = null
-      })
+      if (petProc || petLaunching) return
+      petLaunching = true
+      try {
+        let exe = 'powershell.exe'
+        try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
+        const dir = petDir()
+        const script = SCRIPT()
+        const image = IMAGE()
+        console.error('[deskpet] startPet dir=' + dir + ' script=' + script + ' image=' + image + ' port=' + PORT)
+        const proc = subprocess.spawn({
+          argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script, '-Image', image, '-Name', '\u684c\u5ba0', '-Port', String(PORT)],
+          cwd: dir,
+          stdio: {
+            stdin: 'ignore',
+            stdout: { collect: { maxBytes: 8192 } },
+            stderr: { collect: { maxBytes: 8192 } },
+          },
+          graceMs: 3000,
+        })
+        petProc = proc
+        proc.done.then((outcome) => {
+          console.log('[deskpet] window exited', JSON.stringify(outcome))
+          if (petProc === proc) petProc = null
+        }).catch((e) => {
+          console.error('[deskpet] window spawn failed', e)
+          if (petProc === proc) petProc = null
+        })
+      } finally {
+        petLaunching = false
+      }
     }
 
     function stopPet() {
@@ -267,30 +274,35 @@ module.exports = {
 
     // 便签纸条窗(独立进程, 与桌宠同技术栈): 启动/停止由 config.noteEnabled 驱动
     async function startNotes() {
-      if (noteProc) return
-      let exe = 'powershell.exe'
-      try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
-      const dir = petDir()
-      const script = NOTE_SCRIPT()
-      console.error('[deskpet] startNotes dir=' + dir + ' script=' + script + ' port=' + PORT)
-      const proc = subprocess.spawn({
-        argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script, '-Port', String(PORT)],
-        cwd: dir,
-        stdio: {
-          stdin: 'ignore',
-          stdout: { collect: { maxBytes: 8192 } },
-          stderr: { collect: { maxBytes: 8192 } },
-        },
-        graceMs: 3000,
-      })
-      noteProc = proc
-      proc.done.then((outcome) => {
-        console.log('[deskpet] note window exited', JSON.stringify(outcome))
-        if (noteProc === proc) noteProc = null
-      }).catch((e) => {
-        console.error('[deskpet] note window spawn failed', e)
-        if (noteProc === proc) noteProc = null
-      })
+      if (noteProc || noteLaunching) return
+      noteLaunching = true
+      try {
+        let exe = 'powershell.exe'
+        try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
+        const dir = petDir()
+        const script = NOTE_SCRIPT()
+        console.error('[deskpet] startNotes dir=' + dir + ' script=' + script + ' port=' + PORT)
+        const proc = subprocess.spawn({
+          argv: [exe, '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', script, '-Port', String(PORT)],
+          cwd: dir,
+          stdio: {
+            stdin: 'ignore',
+            stdout: { collect: { maxBytes: 8192 } },
+            stderr: { collect: { maxBytes: 8192 } },
+          },
+          graceMs: 3000,
+        })
+        noteProc = proc
+        proc.done.then((outcome) => {
+          console.log('[deskpet] note window exited', JSON.stringify(outcome))
+          if (noteProc === proc) noteProc = null
+        }).catch((e) => {
+          console.error('[deskpet] note window spawn failed', e)
+          if (noteProc === proc) noteProc = null
+        })
+      } finally {
+        noteLaunching = false
+      }
     }
 
     function stopNotes() {

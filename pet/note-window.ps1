@@ -10,6 +10,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
+# 单实例互斥: 防止 DSH 重启后旧窗口进程(孤儿)与新进程并存 → 重复便签窗口
+$mutex = New-Object System.Threading.Mutex($false, 'Local\DSHRoleplayNoteWindow')
+$hasLock = $false
+try { $hasLock = $mutex.WaitOne(0) } catch { $hasLock = $true }
+if (-not $hasLock) { exit }
+$script:failCount = 0
+
 $base = "http://127.0.0.1:$Port/roleplay"
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
@@ -34,6 +41,8 @@ $script:emptyWin = $null
 # ---------- note window (便利贴) ----------
 function New-NoteWin($note) {
   if ($script:wins.ContainsKey([string]$note.id)) { return }
+  # 已读/收起过的便签不再自动弹出(侧栏便签区可查看)
+  if ([bool]$note.read) { return }
 
   $win = New-Object System.Windows.Window
   $win.WindowStyle = [System.Windows.WindowStyle]::None
@@ -100,6 +109,16 @@ function New-NoteWin($note) {
 
   $btns = New-Object System.Windows.Controls.StackPanel
   $btns.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+  $btnClose = New-Object System.Windows.Controls.Button
+  $btnClose.Content = '-'
+  $btnClose.Width = 24; $btnClose.Height = 24
+  $btnClose.Background = [System.Windows.Media.Brushes]::Transparent
+  $btnClose.BorderThickness = New-Object System.Windows.Thickness(0)
+  $btnClose.Foreground = New-Solid '#8A7B52'
+  $btnClose.FontSize = 16
+  $btnClose.ToolTip = '关闭(收起,不再自动显示)'
+  $null = $btns.Children.Add($btnClose)
+
   $btnRead = New-Object System.Windows.Controls.Button
   $btnRead.Content = [char]0x2713
   $btnRead.Width = 24; $btnRead.Height = 24
@@ -181,6 +200,7 @@ function New-NoteWin($note) {
   $win.Tag = $id
   $btnRead.Tag = $id
   $btnDel.Tag = $id
+  $btnClose.Tag = $id
   $win.Add_LocationChanged({
     if (-not $script:locBusy) {
       $script:locBusy = $true
@@ -201,6 +221,12 @@ function New-NoteWin($note) {
     $null = Post-Json '/notes-ack' @{ id = $rid; action = 'read' }
     $ref = $script:noteRefs[$rid]
     if ($ref) { $ref.host.Opacity = 0.55 }
+  })
+  $btnClose.Add_Click({
+    $cid2 = $this.Tag
+    $null = Post-Json '/notes-ack' @{ id = $cid2; action = 'read' }
+    $ref2 = $script:noteRefs[$cid2]
+    if ($ref2 -and -not $ref2.win.IsClosed) { $ref2.win.Close() }
   })
   $btnDel.Add_Click({
     $did = $this.Tag
@@ -291,7 +317,13 @@ $pollTimer = New-Object System.Windows.Threading.DispatcherTimer
 $pollTimer.Interval = [TimeSpan]::FromSeconds(5)
 $pollTimer.Add_Tick({
   $resp = Post-Json '/notes-list' @{}
-  if (-not $resp -or -not $resp.ok) { return }
+  if (-not $resp -or -not $resp.ok) {
+    # 孤儿自检: DSH 不在(重启/关闭)时连续失败 5 次 → 自我退出, 让新进程接管(防双实例)
+    $script:failCount++
+    if ($script:failCount -gt 5) { try { $mutex.ReleaseMutex() } catch {}; exit }
+    return
+  }
+  $script:failCount = 0
   $list = @($resp.value)
   if ($list.Count -eq 0) {
     foreach ($k in @($script:wins.Keys)) { Remove-NoteWin $k }
