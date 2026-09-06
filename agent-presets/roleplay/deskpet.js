@@ -237,6 +237,15 @@ module.exports = {
 
     ctx.interval(() => { drain() }, 300)
 
+    // 每次 DSH 启动重置一次"便签空窗已关闭"标记: 该会话内用户关闭后不再自动弹出(进程重启也不弹)
+    (async () => {
+      try {
+        const df = await fs.resolve(path.join(petDir(), 'empty-dismissed.txt'))
+        const dinfo = await fs.stat(df)
+        if (dinfo !== undefined) await fs.writeText(df, '', undefined, undefined, getPolicy())
+      } catch (e) { /* 无标记文件则不管 */ }
+    })().catch(() => {})
+
     // 窗口版本标记: 启动窗口前写入当前插件版本 → 旧脚本进程读到版本不符会自退让位(防"旧进程永久霸占Mutex")
     const WINDOW_VERSION = '1.5.10'
     async function writeWindowVersion() {

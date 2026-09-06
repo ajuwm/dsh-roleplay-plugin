@@ -275,9 +275,11 @@ function Remove-NoteWin([string]$id) {
   }
 }
 
-# ---------- empty placeholder (no notes yet, 可关闭且关闭后不再自动弹出) ----------
+# ---------- empty placeholder (no notes yet, 可关闭且关闭状态持久化: 进程重启后也不再弹出) ----------
 function Show-EmptyWin {
   if ($script:emptyDismissed) { return }
+  # 持久化: 上次进程关闭过空窗(deskpet 每次 DSH 启动会清掉此标记)
+  if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'empty-dismissed.txt')) { return }
   if ($script:emptyWin -and -not $script:emptyWin.IsClosed) { return }
   $win = New-Object System.Windows.Window
   $win.WindowStyle = [System.Windows.WindowStyle]::None
@@ -333,6 +335,7 @@ function Show-EmptyWin {
   $btnX.ToolTip = '关闭'
   $btnX.Add_Click({
     $script:emptyDismissed = $true
+    try { [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'empty-dismissed.txt'), '1', $utf8) } catch { }
     if ($script:emptyWin -and -not $script:emptyWin.IsClosed) { $script:emptyWin.Close() }
     $script:emptyWin = $null
   })
@@ -357,9 +360,9 @@ $pollTimer.Interval = [TimeSpan]::FromSeconds(5)
 $pollTimer.Add_Tick({
   $resp = Post-Json '/notes-list' @{}
   if (-not $resp -or -not $resp.ok) {
-    # 孤儿自检: DSH 不在(重启/关闭)时连续失败 5 次 → 自我退出, 让新进程接管(防双实例)
+    # 孤儿自检: DSH 不在(重启/关闭)时连续失败 20 次(约 100s)才退出; 短时抖动不退出(避免频繁重启窗口)
     $script:failCount++
-    if ($script:failCount -gt 5) { try { $mutex.ReleaseMutex() } catch {}; exit }
+    if ($script:failCount -gt 20) { try { $mutex.ReleaseMutex() } catch {}; exit }
     return
   }
   $script:failCount = 0
