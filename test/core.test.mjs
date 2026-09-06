@@ -1123,6 +1123,7 @@ console.log('\nT41 桥接黑盒');
     chatSend: async (args) => ({ ok: !!(args && args.text), message: args && args.text ? 'ok' : 'empty' }),
     chatPoll: async () => ({ messages: [], lastSeq: 0 }),
     chatHistory: async () => ({ messages: [], lastSeq: 0 }),
+    updateSettings: async (args) => ({ ok: !!(args && args.settings), settings: args && args.settings }),
     backupNow: async () => ({ ok: true, day: 'd', count: 1 }),
   };
   const fakeAgent = { id: 's1', session: { events: [] } };
@@ -1169,6 +1170,12 @@ console.log('\nT41 桥接黑盒');
   ok(r6.status === 403, '非回环地址被拒(403)');
   const r7 = await call('/roleplay/backup-now', { target: 's1' });
   ok(r7.out && r7.out.ok === true && r7.out.value.day === 'd', 'backup-now 正常');
+  // settings-update: 成功路径(带 sessionId)必须透传 ok
+  const r8 = await call('/roleplay/settings-update', { sessionId: 's1', settings: { heartbeatMinutes: 60 } });
+  ok(r8.out && r8.out.ok === true && r8.out.value.settings.heartbeatMinutes === 60, 'settings-update(带 sessionId)成功');
+  // chat-targets: 遍历 roots 返回带角色名的列表
+  const r9 = await call('/roleplay/chat-targets', {});
+  ok(r9.out && r9.out.ok === true && Array.isArray(r9.out.value) && String(r9.out.value[0].name) === '甲', 'chat-targets 列表正常');
   process.env.DSH_HOME = oldHome;
   rmSync(root, { recursive: true, force: true });
   rmSync(join(repoRoot, 'node_modules'), { recursive: true, force: true });
