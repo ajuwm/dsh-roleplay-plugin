@@ -2,6 +2,12 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.12] - 对话侧栏 chatSend 消息缺 source → DSH pre-step 链读 undefined.kind 整轮红徽标(真根因)
+- **真根因(会话日志逐事件实证)**: 侧栏 chatSend 发出的用户消息只有 {id, role, content} 没有任何 source 字段; DSH 消息契约要求每条消息带 source(kind: user/plugin/…)。DSH 的 agent/pre-step 链上 dsh-repeat-tool-reminder(`message.source.kind === "user"`)与 dsh-session-reference(`message.source.kind !== "user"`)直接读 `message.source.kind` → undefined.source → **TypeError: Cannot read properties of undefined (reading 'kind')** → 整轮 pre-step 崩溃, 主对话区/侧栏红色徽标「本轮运行失败」。证据: 会话日志中 6 条 chat-* 消息全部只有 agent/inbox/spliced、无 user/message(失败); 同场的 pet-* 消息(带 source.kind=plugin)全部正常完成。
+- **修复**: chatSend 消息补上 `source: { kind: 'user' }`(仍是"真实用户消息"语义: 引擎触摸/金币照常, 侧栏普通气泡, 不标插件)。
+- **pre-step 钩子契约修复(三预设)**: 本钩子是 waterfall 链最外层, 返回值就是整条链结果, agent-loop 直接读 `decision.kind`——因此**绝不返回 undefined**(1.5.10 的 `return undefined` 恰恰把下游真实错误掩盖成同一个 "Cannot read kind", 症状不变)。现在: 下游返回 undefined/抛错 → 兜底 `{kind:'enter', messages: 已认领消息}`, 消息不丢、整轮不红; 真实堆栈打到 DSH 控制台。
+- **测试**: T35 新增 chatSend 必带 source 断言; 新增 T42 pre-step 钩子契约(undefined/抛错/正常/reject 四路径)——全量 **278/278**。
+
 ## [1.5.9] - 修复"旧窗口进程永久霸占"(桌宠异常/便签无关闭按钮的真根因)
 - **问题**: 早先版本的 pet/note 窗口进程曾在 DSH 重启时成孤儿, Mutex 单实例锁被旧进程永久占据 → 此后新脚本(带修复的全新便签/桌宠)永远起不来 → "桌宠无法正常启动""便签一直没关闭按钮"
 - **即时修复**: 已定位并杀掉占位的旧进程, deskpet 用最新脚本重新拉起(便签 − 关闭按钮/便利贴样式/桌宠姿势+穿透全部生效, 无需等待)
