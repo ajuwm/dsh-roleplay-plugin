@@ -2,6 +2,11 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.14] - 修正 1.5.13: z-index 修复把输入框画到设置弹窗蒙层之上 → 改为按钮移出宠物占位区
+- **为什么错**: dsh-whale-musume 气泡 z:1199 高于 DSH Modal 层(z:1000), 而 composer 必须低于 Modal(1000)——不存在"同时高于气泡(1199)又低于弹窗(1000)"的 z 值; 抬到 1300 = 输入框/状态栏浮到「设置」等弹窗的蒙层之上(截图复现)。
+- **正确修法**: 撤销 composer z 提升; 把 🎭/💬 按钮移出宠物固定占位区 —— `body:has([data-dsh-whale-root]) .rp-dock { margin-right: 210px !important; }`(仅宠物存在时生效)。浏览器实测: 按钮从宠物覆盖区(x887-989∩791-991)移到 x677-779(宠物区外), 原生点击 → 侧栏正常打开; 弹窗蒙层下输入框恢复正常层级。
+- 全量测试保持 278/278。
+
 ## [1.5.13] - 🎭 侧栏打不开的真根因: 悬浮宠物插件盖住 dock 按钮吞点击(点🎭没反应/看不了属性)
 - **实证(Tabbit 浏览器实测)**: dsh-whale-musume 悬浮鲸鱼娘(fixed 右下角, z-index 60; 说话气泡 z-index 1199)盖在 DSH composer 容器(z:7 sticky 上下文)之上 —— 🎭/💬 按钮完全被遮, 点击被气泡/立绘层拦截(intercepts pointer events)→ 侧栏打不开。
 - **修复**: 注入 CSS `body [class*="composerSeat"] { z-index: 1300 !important; }` —— 把 composer 容器抬到宠物之上(容器透明, 宠物本体照常显示; 侧栏/聊天面板 z-index 1400/1410 本就高于气泡)。实测: 注入后按钮元素栈首位即 rp-dock-btn, 原生点击 → 侧栏正常打开、角色状态/属性可见。
