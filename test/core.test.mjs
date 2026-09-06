@@ -73,6 +73,15 @@ console.log('\nT0b PS 语法门 (pet/*.ps1)');
   for (const f of psFiles) {
     const target = join(root2, f);
     try {
+      // 要求: 脚本必须自带 UTF-8 BOM(无 BOM 会被 Windows PowerShell 5.1 按 ANSI 解码 → 中文乱码/语法错)
+      const headBytes = readFileSync(target);
+      if (!(headBytes.length >= 3 && headBytes[0] === 0xEF && headBytes[1] === 0xBB && headBytes[2] === 0xBF)) {
+        psBad++;
+        psChecked++;
+        failures.push('PS-BOM: ' + f + ' (丢失 BOM, 必须补回)');
+        console.log('  ❌ ' + f + ' 丢失 UTF-8 BOM');
+        continue;
+      }
       const script = "$b=[System.IO.File]::ReadAllBytes('" + target.replace(/'/g, "''") + "');$hasBom=($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF);if(-not $hasBom){$bom=New-Object byte[] 3;$bom[0]=0xEF;$bom[1]=0xBB;$bom[2]=0xBF;$all=New-Object byte[] ($b.Length+3);[Array]::Copy($bom,0,$all,0,3);[Array]::Copy($b,0,$all,3,$b.Length)}else{$all=$b};$tmp=Join-Path $env:TEMP ('rp-syn-'+[guid]::NewGuid().ToString('N')+'.ps1');[IO.File]::WriteAllBytes($tmp,$all);$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($tmp,[ref]$t,[ref]$e)|Out-Null;Remove-Item $tmp -Force;if($e.Count){Write-Output ('ERR:'+$e[0].Extent.StartLineNumber+':'+$e[0].Message);exit 1}else{exit 0}";
       const r = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
       if (r.error && r.error.code === 'ENOENT') {
@@ -1060,6 +1069,77 @@ console.log('\nT40 备份三层');
   const cards2 = await b2.svc.listCards({ sessionId: 't-session' });
   ok(cards2 && cards2.cards.some((c) => c.name === '甲'), '卡库从快照恢复(甲)');
   rmSync(root, { recursive: true, force: true });
+}
+
+// ─── T41 桥接黑盒: mock webServer/agents, 跑真实 /roleplay 路由 handler ───
+console.log('\nT41 桥接黑盒');
+{
+  // lib/index.js 依赖 @deepseek-ai/schemastery(仅构造 schema, 不会用到校验) → 放一个最小 stub, 测后删除
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+  const stubDir = join(repoRoot, 'node_modules', '@deepseek-ai', 'schemastery');
+  mkdirSync(stubDir, { recursive: true });
+  writeFileSync(join(stubDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/schemastery', type: 'module', main: 'index.mjs' }));
+  writeFileSync(join(stubDir, 'index.mjs'), 'const wrap = (obj) => { const o = { ...(obj || {}) }; for (const m of ["step","min","max","default","description","required","items","object"]) o[m] = function () { return o }; return o };\nexport default { object: (obj) => wrap(obj), string: () => wrap({}), number: () => wrap({}), boolean: () => wrap({}), array: (a) => wrap({ items: a }) };\n');
+  const { default: bridge } = await import(new URL('../lib/index.js', import.meta.url).href);
+  const root = mkdtempSync(join(tmpdir(), 'rp-t41-'));
+  const oldHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = join(root, 'dshhome');
+  const routes = [];
+  const fakeFace = {
+    peek: async () => ({ name: '甲', enabled: true }),
+    getState: async () => ({ ok: true, character: { name: '甲' } }),
+    chatSend: async (args) => ({ ok: !!(args && args.text), message: args && args.text ? 'ok' : 'empty' }),
+    chatPoll: async () => ({ messages: [], lastSeq: 0 }),
+    chatHistory: async () => ({ messages: [], lastSeq: 0 }),
+    backupNow: async () => ({ ok: true, day: 'd', count: 1 }),
+  };
+  const fakeAgent = { id: 's1', session: { events: [] } };
+  const ctxT = {
+    webServer: { register: (r) => { routes.push(r); return () => {} }, port: 3080 },
+    effect: (fn) => { if (typeof fn === 'function') fn(); },
+    get: (n) => {
+      if (n === 'webServer') return undefined;
+      if (n === 'agents') return { get: () => fakeAgent, roots: () => [fakeAgent] };
+      if (n === 'agentPresets') return { serviceFor: (a, svc) => (svc === 'roleplay' ? fakeFace : undefined) };
+      if (n === 'settings') return { get: () => ({ heartbeatMinutes: 30 }), register: () => {} };
+      if (n === 'timer') return { interval: () => {} };
+      return undefined;
+    },
+  };
+  bridge.apply(ctxT, {});
+  const route = routes.find((r) => r.kind === 'prefix' && r.path === '/roleplay');
+  ok(!!route, '桥接前缀路由已注册');
+  const call = async (url, body, remote = '127.0.0.1') => {
+    let status = 0; let out = null;
+    const payload = Buffer.from(JSON.stringify(body || {}));
+    const req = {
+      url, method: 'POST', socket: { remoteAddress: remote },
+      on: (ev, fn) => { if (ev === 'data') fn(payload); if (ev === 'end') fn(); },
+      destroy: () => {},
+    };
+    const res = { writeHead: (s) => { status = s }, end: (t) => { out = t } };
+    await route.handler(req, res);
+    let parsed = null;
+    try { parsed = out ? JSON.parse(out) : null } catch (e) { parsed = null }
+    return { status, out: parsed };
+  };
+  const r1 = await call('/roleplay/settings-read', {});
+  ok(r1.status === 200 && r1.out && r1.out.ok === true && r1.out.value.heartbeatMinutes === 30, 'settings-read 正常');
+  const r2 = await call('/roleplay/nope', {});
+  ok(r2.out && r2.out.ok === false && r2.out.error && r2.out.error.code === 'bad-endpoint', 'unknown endpoint 报错');
+  const r3 = await call('/roleplay/chat-send', { target: 's1', text: '你好' });
+  ok(r3.out && r3.out.ok === true, 'chat-send 走 target');
+  const r4 = await call('/roleplay/chat-send', { target: 's1', text: '' });
+  ok(r4.out && r4.out.ok === false, 'chat-send 空消息被拒');
+  const r5 = await call('/roleplay/get-state', { sessionId: 's1' });
+  ok(r5.out && r5.out.ok === true && r5.out.value.character.name === '甲', 'get-state 正常');
+  const r6 = await call('/roleplay/settings-read', {}, '10.0.0.5');
+  ok(r6.status === 403, '非回环地址被拒(403)');
+  const r7 = await call('/roleplay/backup-now', { target: 's1' });
+  ok(r7.out && r7.out.ok === true && r7.out.value.day === 'd', 'backup-now 正常');
+  process.env.DSH_HOME = oldHome;
+  rmSync(root, { recursive: true, force: true });
+  rmSync(join(repoRoot, 'node_modules'), { recursive: true, force: true });
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }

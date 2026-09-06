@@ -197,7 +197,12 @@ module.exports = {
     // 配置监视：config.json 的 enabled 驱动窗口起停（侧栏按钮 / 手动改文件均生效）。
     // 注意：配置缺失/损坏时【默认启用】并继续尝试启动（与“启动中…卡死”问题一致——
     // 之前读不到配置会整个静默跳过，永远不调用 startPet/startNotes）。
+    // 节流: config.json 低频变化, 2s 读一次即可(原 300ms 每次 drain 全量读盘)
+    let lastConfigCheck = 0
     async function checkConfig() {
+      const nowMs = Date.now()
+      if (nowMs - lastConfigCheck < 2000) return
+      lastConfigCheck = nowMs
       let cfg = {}
       try {
         const target = await fs.resolve(path.join(petDir(), 'config.json'))

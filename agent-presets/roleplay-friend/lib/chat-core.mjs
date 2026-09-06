@@ -35,19 +35,25 @@ export function extractMessage(ev) {
 }
 
 // 取 seq > sinceSeq 的消息(增量子集,尾部截断 limit 条);lastSeq = 所见最大 seq(含未提取文本的事件)。
+// 性能: 事件按 seq 递增追加 → 从尾部向前扫, 遇到 seq<=sinceSeq 早停 (长会话增量轮询 O(新增) 而非 O(全量))。
 export function pickMessages(events, sinceSeq = 0, limit = 200) {
   const out = []
-  if (!Array.isArray(events)) return { messages: out, lastSeq: Number(sinceSeq) || 0 }
-  let last = Number(sinceSeq) || 0
-  for (const ev of events) {
+  if (!Array.isArray(events) || events.length === 0) return { messages: out, lastSeq: Number(sinceSeq) || 0 }
+  const since = Number(sinceSeq) || 0
+  const lastEv = events[events.length - 1]
+  const last = lastEv && typeof lastEv.seq === 'number' ? Math.max(since, lastEv.seq) : since
+  const got = []
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
     if (!ev || typeof ev.seq !== 'number') continue
-    if (ev.seq > last) last = ev.seq
-    if (ev.seq <= (Number(sinceSeq) || 0)) continue
+    if (ev.seq <= since) break
     const m = extractMessage(ev)
-    if (m) out.push({ seq: ev.seq, ...m })
+    if (m) got.push({ seq: ev.seq, ...m })
+    if (got.length >= limit * 2) break
   }
-  if (out.length > limit) out.splice(0, out.length - limit)
-  return { messages: out, lastSeq: last }
+  got.reverse()
+  if (got.length > limit) got.splice(0, got.length - limit)
+  return { messages: got, lastSeq: last }
 }
 
 // 历史视图:从 0 开始取最近 limit 条(不论 seq 高低,保持原序尾部)。

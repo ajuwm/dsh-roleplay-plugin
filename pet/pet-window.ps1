@@ -8,6 +8,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
 
 # 单实例互斥: 防止 DSH 重启后旧窗口进程(孤儿)与新进程并存 → 重复立绘窗口
 $mutex = New-Object System.Threading.Mutex($false, 'Local\DSHRoleplayPetWindow')
@@ -732,9 +733,6 @@ $script:prevHit = $true
 $hitTimer.Add_Tick({
   if ($script:menuOpen) { return }
   try {
-    $pt = New-Object System.Windows.Point
-    $null = [System.Windows.Forms.Cursor]::Position
-    Add-Type -AssemblyName System.Windows.Forms | Out-Null
     $sp = [System.Windows.Forms.Cursor]::Position
     $local = $win.PointFromScreen((New-Object System.Windows.Point($sp.X, $sp.Y)))
     $x = $local.X; $y = $local.Y

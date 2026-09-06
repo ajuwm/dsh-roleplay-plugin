@@ -2,6 +2,19 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.8] - 全面检查与优化(性能/健壮性/桥接黑盒测试)
+- **性能**:
+  - `chat-core.pickMessages` 增量轮询从"全量扫描"改为"尾部倒扫+早停"(长会话 1.5s 轮询 O(新增) 而非 O(全量))
+  - deskpet `checkConfig` 读盘节流(300ms→2s, 修掉 drain 高频全量读 config.json)
+  - pet-window 穿透 timer 里的 `Add-Type System.Windows.Forms` 从每 30ms 执行移出到启动时一次
+- **修复**:
+  - 桥接未知端点优先返回 `bad-endpoint`(不再被 face 检查误报为 roleplay-unavailable; 已知端点白名单)
+  - PS 脚本 BOM 加固: T0b 升级为"**文件必须自带 UTF-8 BOM**"(edit 工具偶尔丢 BOM → 本地/CI 直接红灯; 已人工补回 pet/note 两脚本)
+- **测试(自我验证)**:
+  - 新增 **T41 桥接黑盒**: mock webServer/agents/timer(含 schemastery 最小 stub, 测后清理), 跑真实 `/roleplay` 路由 handler —— 验证 settings-read/未知端点/chat-send(target+空消息)/get-state/backup-now/非回环 403 共 8 项
+  - 全量现在 **270/270**; pet 窗口真实启动 8s 稳定
+- **数据安全**: 改动前已对 `D:\dsh\.roleplay*` 做了完整快照(`roleplay-persist\datasnap-20260906-115418`), 全程零数据改动
+
 ## [1.5.7] - 桌宠"统一借鉴"升级(whale-musume/dsh-pet/xiuxian 三合一)
 - 调研并借鉴 DSH 生态三款开源桌宠(whale-musume 鲸鱼娘 / dsh-pet 桌面鲸鱼 / dsh-xiuxian 修仙像素宠), 落地到我们自己的 WPF 桌宠:
   - **[whale] 状态机姿势集**: 桥接新增 `/pet/state`(从 agents 拿真实会话状态: 待确认>工作中>空闲, 优先级), 立绘自动切换姿势——`<立绘名>-working/idle/pending.png`(有图就切, 无图回退单张), 呼吸动画按状态变速(待确认急促/工作平稳/空闲舒缓)
