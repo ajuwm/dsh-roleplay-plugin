@@ -16,7 +16,7 @@ $hasLock = $false
 try { $hasLock = $mutex.WaitOne(0) } catch { $hasLock = $true }
 if (-not $hasLock) { exit }
 # 版本自检: deskpet 每次启动前写 window-version.txt; 本脚本版本比标记旧 → 自退让位(防旧进程永久霸占)
-$script:windowVersion = '1.5.9'
+$script:windowVersion = '1.5.10'
 $verTimer = New-Object System.Windows.Threading.DispatcherTimer
 $verTimer.Interval = [TimeSpan]::FromSeconds(10)
 $verTimer.Add_Tick({
@@ -198,12 +198,12 @@ function Set-Pose([string]$mode) {
 
 function Apply-Scale {
   $cur = [System.Windows.Media.ImageSource]$img.Source
-  $ph = 1
-  try { $ph = $cur.Height } catch { $ph = $bmp.PixelHeight }
+  $pw = 1; $ph = 1
+  try { $pw = $cur.Width; $ph = $cur.Height } catch { $pw = $bmp.PixelWidth; $ph = $bmp.PixelHeight }
   if ($ph -lt 1) { return }
   $imgH = [int]($work.Height * [double]$script:cfg.scale)
   $ratio = $imgH / $ph
-  $win.Width = [int]($img.ActualWidth * $ratio)
+  $win.Width = [int]($pw * $ratio)
   $win.Height = $imgH + $script:stripH
   $inputBox.Width = [Math]::Max(120, $win.Width - 96)
   Apply-Position

@@ -17,7 +17,7 @@ try { $hasLock = $mutex.WaitOne(0) } catch { $hasLock = $true }
 if (-not $hasLock) { exit }
 $script:failCount = 0
 # 版本自检: deskpet 每次启动前写 window-version.txt; 本脚本版本比标记旧 → 自退让位(防旧进程永久霸占)
-$script:windowVersion = '1.5.9'
+$script:windowVersion = '1.5.10'
 $verTimer = New-Object System.Windows.Threading.DispatcherTimer
 $verTimer.Interval = [TimeSpan]::FromSeconds(10)
 $verTimer.Add_Tick({

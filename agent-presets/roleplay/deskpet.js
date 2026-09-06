@@ -238,7 +238,7 @@ module.exports = {
     ctx.interval(() => { drain() }, 300)
 
     // 窗口版本标记: 启动窗口前写入当前插件版本 → 旧脚本进程读到版本不符会自退让位(防"旧进程永久霸占Mutex")
-    const WINDOW_VERSION = '1.5.9'
+    const WINDOW_VERSION = '1.5.10'
     async function writeWindowVersion() {
       try {
         const vf = await fs.resolve(path.join(petDir(), 'window-version.txt'))
