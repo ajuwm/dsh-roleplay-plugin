@@ -237,10 +237,20 @@ module.exports = {
 
     ctx.interval(() => { drain() }, 300)
 
+    // 窗口版本标记: 启动窗口前写入当前插件版本 → 旧脚本进程读到版本不符会自退让位(防"旧进程永久霸占Mutex")
+    const WINDOW_VERSION = '1.5.9'
+    async function writeWindowVersion() {
+      try {
+        const vf = await fs.resolve(path.join(petDir(), 'window-version.txt'))
+        await fs.writeText(vf, WINDOW_VERSION, undefined, undefined, getPolicy())
+      } catch (e) { /* 版本文件写失败不阻塞 */ }
+    }
+
     async function startPet() {
       if (petProc || petLaunching) return
       petLaunching = true
       try {
+        await writeWindowVersion()
         let exe = 'powershell.exe'
         try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
         const dir = petDir()
@@ -282,6 +292,7 @@ module.exports = {
       if (noteProc || noteLaunching) return
       noteLaunching = true
       try {
+        await writeWindowVersion()
         let exe = 'powershell.exe'
         try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) { }
         const dir = petDir()

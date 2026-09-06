@@ -16,6 +16,23 @@ $hasLock = $false
 try { $hasLock = $mutex.WaitOne(0) } catch { $hasLock = $true }
 if (-not $hasLock) { exit }
 $script:failCount = 0
+# 版本自检: deskpet 每次启动前写 window-version.txt; 本脚本版本比标记旧 → 自退让位(防旧进程永久霸占)
+$script:windowVersion = '1.5.9'
+$verTimer = New-Object System.Windows.Threading.DispatcherTimer
+$verTimer.Interval = [TimeSpan]::FromSeconds(10)
+$verTimer.Add_Tick({
+  try {
+    $vf = Join-Path $PSScriptRoot 'window-version.txt'
+    if (Test-Path -LiteralPath $vf) {
+      $v = (Get-Content -LiteralPath $vf -Raw -Encoding UTF8).Trim()
+      if ($v -and $v -ne $script:windowVersion) {
+        try { $mutex.ReleaseMutex() } catch { }
+        exit
+      }
+    }
+  } catch { }
+})
+$verTimer.Start()
 
 $base = "http://127.0.0.1:$Port/roleplay"
 $utf8 = New-Object System.Text.UTF8Encoding($false)
