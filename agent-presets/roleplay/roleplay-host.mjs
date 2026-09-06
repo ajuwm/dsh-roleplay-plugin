@@ -2643,41 +2643,54 @@ export function apply(ctx, config) {
     // ==================== 事件监听 ====================
 
     ctx.on('agent/pre-step', async ({ agent, turn, step, signal }, next) => {
-      if (!selfAgent && agent) selfAgent = agent
-      await ensureLoaded()
-      const decision = await next()
-      if (decision.kind === 'reject' || signal.aborted) return decision
-      const messages = decision.messages || []
-      const userTexts = messages.filter((m) => m && m.role === 'user' && m.content).map((m) => m.content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ')).join(' ')
-      if (userTexts) lastContextText = userTexts.slice(-800)
-      // 真实用户消息（非插件注入）记为一次互动
-      const userReal = messages.some((m) => m && m.role === 'user' && m.content && !(m.id && String(m.id).startsWith('rp-')) && !(m.source && m.source.kind === 'plugin'))
-      if (userReal) { touchSeen(); maybeEarnCoins() }
-      lastTurnStart = lastTurnStart || Date.now()
-      const kept = messages.filter((m) => !(m && m.id && String(m.id).startsWith('rp-hb-')))
-      if (pendingHeartbeats.length === 0) {
-        return kept.length === messages.length ? decision : { kind: 'enter', messages: kept }
+      try {
+        if (!selfAgent && agent) selfAgent = agent
+        await ensureLoaded()
+        const decision = await next()
+        // 防御: DSH 不同版本下 next() 可能返回 undefined/空(钩子链末端的合法情况),
+        // 直接原样透传, 绝不访问其属性(否则整轮报 "Cannot read properties of undefined")
+        if (decision === undefined || decision === null) return undefined
+        if (decision.kind === 'reject' || (signal && signal.aborted)) return decision
+        const messages = decision.messages || []
+        const userTexts = messages.filter((m) => m && m.role === 'user' && m.content).map((m) => m.content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ')).join(' ')
+        if (userTexts) lastContextText = userTexts.slice(-800)
+        // 真实用户消息（非插件注入）记为一次互动
+        const userReal = messages.some((m) => m && m.role === 'user' && m.content && !(m.id && String(m.id).startsWith('rp-')) && !(m.source && m.source.kind === 'plugin'))
+        if (userReal) { touchSeen(); maybeEarnCoins() }
+        lastTurnStart = lastTurnStart || Date.now()
+        const kept = messages.filter((m) => !(m && m.id && String(m.id).startsWith('rp-hb-')))
+        if (pendingHeartbeats.length === 0) {
+          return kept.length === messages.length ? decision : { kind: 'enter', messages: kept }
+        }
+        // 注入前提：本实例已锁定目标会话（selfAgent，由侧栏轮询/操作设置），
+        // 且仍处于开演状态。无主实例（如无人使用的 roleplay 预设实例）不得向
+        // 所有会话广播心跳；停止扮演后残留的排队心跳直接丢弃。
+        if (!selfAgent || !state.enabled || !state.character) {
+          pendingHeartbeats.length = 0
+          return kept.length === messages.length ? decision : { kind: 'enter', messages: kept }
+        }
+        const text = pendingHeartbeats.shift()
+        hbDiag.injected++
+        kept.push(makeUserMessage(text, 'ctx'))
+        return { kind: 'enter', messages: kept }
+      } catch (e) {
+        // 绝不让我们的钩子异常拖垮整轮(记录堆栈便于修复)
+        console.error('[roleplay] agent/pre-step failed:', e && e.stack ? e.stack : e)
+        return undefined
       }
-      // 注入前提：本实例已锁定目标会话（selfAgent，由侧栏轮询/操作设置），
-      // 且仍处于开演状态。无主实例（如无人使用的 roleplay 预设实例）不得向
-      // 所有会话广播心跳；停止扮演后残留的排队心跳直接丢弃。
-      if (!selfAgent || !state.enabled || !state.character) {
-        pendingHeartbeats.length = 0
-        return kept.length === messages.length ? decision : { kind: 'enter', messages: kept }
-      }
-      const text = pendingHeartbeats.shift()
-      hbDiag.injected++
-      kept.push(makeUserMessage(text, 'ctx'))
-      return { kind: 'enter', messages: kept }
     }, { prepend: true })
 
     ctx.on('agent/turn-stopping', ({ agent, turn }) => {
-      if (!stateLoaded || !state.enabled || !state.character) return
-      if (!saidGreeting) saidGreeting = true
-      lastTurnStart = 0
-      scanAssistantMessages(agent && agent.session ? agent.session : undefined)
-      // 房间模式：每轮结束后刷新成员快照（关系/记忆变化反映到下一轮提示）
-      if (Array.isArray(state.roomMembers) && state.roomMembers.length) refreshRoomSnapshot().catch(() => {})
+      try {
+        if (!stateLoaded || !state.enabled || !state.character) return
+        if (!saidGreeting) saidGreeting = true
+        lastTurnStart = 0
+        scanAssistantMessages(agent && agent.session ? agent.session : undefined)
+        // 房间模式：每轮结束后刷新成员快照（关系/记忆变化反映到下一轮提示）
+        if (Array.isArray(state.roomMembers) && state.roomMembers.length) refreshRoomSnapshot().catch(() => {})
+      } catch (e) {
+        console.error('[roleplay] agent/turn-stopping failed:', e && e.stack ? e.stack : e)
+      }
     })
 
     // DSH 插件设置面板改动（settings/updated）→ 回写 state.settings 并保存，让侧栏同步。
