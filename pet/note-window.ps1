@@ -54,6 +54,7 @@ function New-Solid([string]$hex) {
 $script:wins = New-Object 'System.Collections.Generic.Dictionary[string,object]'
 $script:noteRefs = New-Object 'System.Collections.Generic.Dictionary[string,object]'
 $script:emptyWin = $null
+$script:emptyDismissed = $false
 
 # ---------- note window (便利贴) ----------
 function New-NoteWin($note) {
@@ -274,8 +275,9 @@ function Remove-NoteWin([string]$id) {
   }
 }
 
-# ---------- empty placeholder (no notes yet) ----------
+# ---------- empty placeholder (no notes yet, 可关闭且关闭后不再自动弹出) ----------
 function Show-EmptyWin {
+  if ($script:emptyDismissed) { return }
   if ($script:emptyWin -and -not $script:emptyWin.IsClosed) { return }
   $win = New-Object System.Windows.Window
   $win.WindowStyle = [System.Windows.WindowStyle]::None
@@ -317,7 +319,27 @@ function Show-EmptyWin {
   $t2.Margin = New-Object System.Windows.Thickness(0, 5, 0, 0)
   $t2.TextWrapping = [System.Windows.TextWrapping]::Wrap
   $null = $st.Children.Add($t2)
-  $b.Child = $st
+  # 右上角小关闭(事件只引用脚本级状态, 不引用函数局部变量)
+  $btnX = New-Object System.Windows.Controls.Button
+  $btnX.Content = [char]0x00D7
+  $btnX.Width = 22; $btnX.Height = 22
+  $btnX.Background = [System.Windows.Media.Brushes]::Transparent
+  $btnX.BorderThickness = New-Object System.Windows.Thickness(0)
+  $btnX.Foreground = New-Solid '#C07969'
+  $btnX.FontSize = 14
+  $btnX.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+  $btnX.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+  $btnX.Margin = New-Object System.Windows.Thickness(0, 6, 8, 0)
+  $btnX.ToolTip = '关闭'
+  $btnX.Add_Click({
+    $script:emptyDismissed = $true
+    if ($script:emptyWin -and -not $script:emptyWin.IsClosed) { $script:emptyWin.Close() }
+    $script:emptyWin = $null
+  })
+  $g2 = New-Object System.Windows.Controls.Grid
+  $null = $g2.Children.Add($st)
+  $null = $g2.Children.Add($btnX)
+  $b.Child = $g2
   $win.Content = $b
   $win.Add_MouseLeftButtonDown({ $this.DragMove() })
   $script:emptyWin = $win
