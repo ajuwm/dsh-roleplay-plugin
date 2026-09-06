@@ -87,13 +87,105 @@ $bmp.UriSource = New-Object System.Uri($Image)
 $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
 $bmp.EndInit()
 
+# 精确点击穿透(借鉴 dsh-pet): 把立绘透明区域采样成低分辨率网格, 鼠标落在透明区 → WS_EX_TRANSPARENT(点穿), 落在角色身上 → 正常交互
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+public static class PetAlpha {
+  public static byte[] Grid(string path, int cols) {
+    try {
+      var dec = BitmapDecoder.Create(new Uri(path), BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+      var fr = dec.Frames[0];
+      var cv = new FormatConvertedBitmap(fr, PixelFormats.Pbgra32, null, 0);
+      int w = cv.PixelWidth, h = cv.PixelHeight;
+      int rows = Math.Max(1, (int)Math.Round((double)h * cols / w));
+      var px = new byte[w * h * 4];
+      cv.CopyPixels(px, w * 4, 0);
+      var grid = new byte[rows * cols];
+      for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) {
+        int x0 = c * w / cols, x1 = (c + 1) * w / cols, y0 = r * h / rows, y1 = (r + 1) * h / rows;
+        int sum = 0, n = 0;
+        for (int y = y0; y < y1; y += 2) for (int x = x0; x < x1; x += 2) {
+          int i = (y * w + x) * 4 + 3;
+          sum += px[i]; n++;
+        }
+        grid[r * cols + c] = (n > 0 && sum / n > 40) ? (byte)1 : (byte)0;
+      }
+      return grid;
+    } catch (Exception) { return null; }
+  }
+}
+'@ -ReferencedAssemblies @('PresentationCore', 'WindowsBase', 'System.Xaml')
+$script:alphaGrid = $null
+$script:alphaCols = 40
+$script:alphaRows = 0
+try {
+  if (Test-Path -LiteralPath $Image) {
+    $script:alphaGrid = [PetAlpha]::Grid($Image, $script:alphaCols)
+    if ($script:alphaGrid) { $script:alphaRows = [int]($script:alphaGrid.Length / $script:alphaCols) }
+  }
+} catch { $script:alphaGrid = $null }
+
+function Set-PetTransparent([bool]$on) {
+  try {
+    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
+    if ($hwnd -eq [IntPtr]::Zero) { return }
+    $ex = [PetAlphaNative]::GetWindowLong($hwnd, -20)
+    if ($on) { [PetAlphaNative]::SetWindowLong($hwnd, -20, $ex -bor 0x20) }
+    else { [PetAlphaNative]::SetWindowLong($hwnd, -20, $ex -band (-bnot 0x20)) }
+  } catch { }
+}
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class PetAlphaNative {
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+}
+'@
+
 $work = [System.Windows.SystemParameters]::WorkArea
 $script:stripH = 110
 
+# ── 姿势集(借鉴 dsh-whale-musume 状态机姿势): 立绘同目录下 lihui-<mode>.png →
+#    工作/空闲/待确认; 缺省回退 lihui.png ──
+$script:mode = 'idle'
+$script:lastMode = ''
+function Load-Image([string]$path) {
+  try {
+    $b2 = New-Object System.Windows.Media.Imaging.BitmapImage
+    $b2.BeginInit()
+    $b2.UriSource = New-Object System.Uri($path)
+    $b2.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+    $b2.EndInit()
+    return $b2
+  } catch { return $null }
+}
+function Set-Pose([string]$mode) {
+  $base = [System.IO.Path]::GetFileNameWithoutExtension($Image)
+  $map = @{ working = 'working'; idle = 'idle'; pending = 'pending' }
+  $suffix = $map[$mode]
+  $cand = $null
+  if ($suffix) {
+    $p = Join-Path (Split-Path $Image) ($base + '-' + $suffix + '.png')
+    if (Test-Path -LiteralPath $p) { $cand = $p }
+  }
+  if ($cand) {
+    $nb = Load-Image $cand
+    if ($nb) { $script:bmpPose = $nb; $img.Source = $nb; Apply-Scale }
+  }
+}
+
 function Apply-Scale {
+  $cur = [System.Windows.Media.ImageSource]$img.Source
+  $ph = 1
+  try { $ph = $cur.Height } catch { $ph = $bmp.PixelHeight }
+  if ($ph -lt 1) { return }
   $imgH = [int]($work.Height * [double]$script:cfg.scale)
-  $ratio = $imgH / $bmp.PixelHeight
-  $win.Width = [int]($bmp.PixelWidth * $ratio)
+  $ratio = $imgH / $ph
+  $win.Width = [int]($img.ActualWidth * $ratio)
   $win.Height = $imgH + $script:stripH
   $inputBox.Width = [Math]::Max(120, $win.Width - 96)
   Apply-Position
@@ -216,7 +308,7 @@ $bobTimer = New-Object System.Windows.Threading.DispatcherTimer
 $bobTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $script:bobPhase = 0
 $bobTimer.Add_Tick({
-  $script:bobPhase += 0.055
+  $script:bobPhase += $(if ($script:mode -eq 'pending') { 0.15 } elseif ($script:mode -eq 'working') { 0.08 } else { 0.055 })
   $translate.Y = [Math]::Sin($script:bobPhase) * 7
 })
 
@@ -521,6 +613,13 @@ Add-Menu '退出（并停用桌宠）' {
   Save-Config
   $win.Close()
 }
+# 动态状态项(借鉴 xiuxian 场景化菜单): 只读展示, 随 /pet/state 更新
+$menuState = New-Object System.Windows.Controls.MenuItem
+$menuState.Header = '状态: —'
+$menuState.IsEnabled = $false
+$null = $ctxMenu.Items.Insert(0, $menuState)
+$ctxMenu.Add_Opened({ $script:menuOpen = $true; Set-PetTransparent $false })
+$ctxMenu.Add_Closed({ $script:menuOpen = $false })
 $img.ContextMenu = $ctxMenu
 
 # ---------- reply poll (HTTP) ----------
@@ -596,11 +695,80 @@ $moodTimer.Add_Tick({
 })
 $moodTimer.Start()
 
+# ---------- 状态机轮询(借鉴 dsh-whale-musume/dsh-pet): /pet/state → 姿势 + 呼吸 + 菜单状态 + 低打扰提示 ----------
+$stateTimer = New-Object System.Windows.Threading.DispatcherTimer
+$stateTimer.Interval = [TimeSpan]::FromMilliseconds(1500)
+$stateTimer.Add_Tick({
+  try {
+    $st = Get-Json '/state'
+    if ($st -and $st.ok -and $st.state) {
+      $m = [string]$st.state.mode
+      $label = [string]$st.state.label
+      if (-not $label) { $label = '空闲' }
+      $script:mode = $m
+      if ($m -ne $script:lastMode) {
+        $wasMode = $script:lastMode
+        $script:lastMode = $m
+        Set-Pose $m
+        $menuState.Header = '状态: ' + $label
+        if ($m -eq 'pending' -and $wasMode -ne 'pending') { Show-Bubble '（有任务等你确认呢……）' }
+        elseif ($m -eq 'working' -and $wasMode -eq 'idle') { Show-Bubble '（她在认真工作了……）' }
+        elseif ($m -eq 'idle' -and $wasMode -eq 'working') { Show-Bubble '（忙完啦～）' }
+      } else {
+        $menuState.Header = '状态: ' + $label
+      }
+      # mood 角标: 工作/待确认优先展示, idle 时交回 mood 轮询显示心情
+      if ($m -eq 'pending') { $moodText.Text = '待确认'; $moodText.Foreground = [System.Windows.Media.Brushes]::White }
+      elseif ($m -eq 'working') { $moodText.Text = '工作中'; $moodText.Foreground = [System.Windows.Media.Brushes]::White }
+    }
+  } catch { }
+})
+$stateTimer.Start()
+
+# ---------- 精确点击穿透(借鉴 dsh-pet): 30ms 轮询鼠标位置, 透明区置 WS_EX_TRANSPARENT ----------
+$hitTimer = New-Object System.Windows.Threading.DispatcherTimer
+$hitTimer.Interval = [TimeSpan]::FromMilliseconds(30)
+$script:prevHit = $true
+$hitTimer.Add_Tick({
+  if ($script:menuOpen) { return }
+  try {
+    $pt = New-Object System.Windows.Point
+    $null = [System.Windows.Forms.Cursor]::Position
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    $sp = [System.Windows.Forms.Cursor]::Position
+    $local = $win.PointFromScreen((New-Object System.Windows.Point($sp.X, $sp.Y)))
+    $x = $local.X; $y = $local.Y
+    $hit = $true
+    if (-not $script:alphaGrid -or $script:alphaRows -le 0) {
+      $hit = $true
+    } elseif ($y -lt $script:stripH) {
+      $hit = $true   # 顶部气泡/输入区始终可交互
+    } else {
+      $iy = $y - $script:stripH
+      $imgH = $img.ActualHeight; $imgW = $img.ActualWidth
+      if ($imgH -le 0 -or $imgW -le 0) { $hit = $true }
+      else {
+        $c = [Math]::Floor($x / $imgW * $script:alphaCols)
+        $r = [Math]::Floor($iy / $imgH * $script:alphaRows)
+        if ($c -lt 0 -or $c -ge $script:alphaCols -or $r -lt 0 -or $r -ge $script:alphaRows) { $hit = $true }
+        else { $hit = ($script:alphaGrid[$r * $script:alphaCols + $c] -eq 1) }
+      }
+    }
+    if ($hit -ne $script:prevHit) {
+      $script:prevHit = $hit
+      Set-PetTransparent (-not $hit)
+    }
+  } catch { }
+})
+$hitTimer.Start()
+
 $win.Add_Closed({
   $bobTimer.Stop()
   $pollTimer.Stop()
   $bubblePollTimer.Stop()
   $moodTimer.Stop()
+  $stateTimer.Stop()
+  $hitTimer.Stop()
 })
 
 Apply-Scale

@@ -404,6 +404,42 @@ module.exports = {
       json(res, 200, { ok: true, window: petProc ? 'running' : 'stopped', enabled: petEnabled, session: targetSessionId })
     } }))
 
+    // 桌宠状态(借鉴 dsh-pet/whale-musume): 从 agents 拿真实会话状态, 优先级 待确认>工作>完成>空闲>离线
+    routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/state', handler: async (req, res) => {
+      try {
+        let pending = 0
+        let working = 0
+        let idleSessions = 0
+        let lastEvent = ''
+        const roots = []
+        try { roots.push(...(agents.roots() || [])) } catch (e) { }
+        let lastSeq = -1
+        for (const a of roots) {
+          try {
+            const ev = a.session && a.session.events
+            if (!Array.isArray(ev)) continue
+            const last = ev[ev.length - 1]
+            if (last && typeof last.seq === 'number' && last.seq > lastSeq) { lastSeq = last.seq; lastEvent = String(last.type || '') }
+            const tail = ev.slice(-8).map((e) => String(e.type || ''))
+            if (tail.some((t) => t.indexOf('approval') >= 0 || t.indexOf('permission') >= 0)) pending++
+            const status = a.status
+            if (status === 'running') working++
+            else if (status === 'idle' || status === 'ready') idleSessions++
+          } catch (e) { /* 单个会话异常不影响 */ }
+        }
+        let mode = 'idle'
+        let label = '\u7A7A\u95F2'
+        let priority = 0
+        if (pending > 0) { mode = 'pending'; label = '\u5F85\u786E\u8BA4'; priority = 4 }
+        else if (working > 0) { mode = 'working'; label = '\u5DE5\u4F5C\u4E2D'; priority = 3 }
+        else if (idleSessions > 0) { mode = 'idle'; label = '\u7A7A\u95F2'; priority = 1 }
+        else { priority = 0 }
+        json(res, 200, { ok: true, state: { mode, label, priority, pending, working, idleSessions, lastEvent, sessions: roots.length } })
+      } catch (e) {
+        json(res, 200, { ok: true, state: { mode: 'idle', label: '\u7A7A\u95F2', priority: 1, pending: 0, working: 0, idleSessions: 0, lastEvent: '', sessions: 0 } })
+      }
+    } }))
+
     // 桌宠心情角标: 读共享 character.json 的 stats/relation 推导表情(文件级, 无会话依赖)
     routeDisposers.push(webServer.register({ kind: 'exact', path: '/pet/mood', handler: async (req, res) => {
       const idle = { emoji: '\uD83D\uDCA4', label: '\u672A\u5F00\u6F14', tone: 'idle' }
