@@ -2128,16 +2128,18 @@ export function apply(ctx, config) {
     function publicGameState() {
       const g = state.game
       if (!g) return null
-      if (g.kind === 'guess') return { kind: 'guess', range: g.range, limit: g.limit, tries: g.tries, triesLeft: Math.max(0, g.limit - g.tries), lastResult: g.lastResult || null, over: !!g.over, won: !!g.won }
-      if (g.kind === 'twenty') return { kind: 'twenty', asks: g.asks, limit: g.limit, over: !!g.over, won: !!g.won, answered: Array.isArray(g.log) ? g.log : [] }
-      if (g.kind === 'ttt') return { kind: 'ttt', board: g.board, your: g.your, ai: g.ai, over: !!g.over, winner: g.winner || null }
-      if (g.kind === 'truth') return { kind: 'truth', tier: g.tier, round: g.round, pending: !!g.pending, lastPrompt: g.lastPrompt || null }
+      if (g.kind === 'guess') return { kind: 'guess', range: g.range, limit: g.limit, tries: g.tries, triesLeft: Math.max(0, g.limit - g.tries), lastResult: g.lastResult || null, over: !!g.over, won: !!g.won, waiting: !!g.waitWaiting }
+      if (g.kind === 'twenty') return { kind: 'twenty', asks: g.asks, limit: g.limit, over: !!g.over, won: !!g.won, answered: Array.isArray(g.log) ? g.log : [], waiting: !!g.waitWaiting }
+      if (g.kind === 'ttt') return { kind: 'ttt', board: g.board, your: g.your, ai: g.ai, over: !!g.over, winner: g.winner || null, waiting: !!g.waitWaiting }
+      if (g.kind === 'truth') return { kind: 'truth', tier: g.tier, round: g.round, pending: !!g.pending, lastPrompt: g.lastPrompt || null, waiting: !!g.waitWaiting }
       return { kind: g.kind }
     }
+    // 游戏台词注入(回合锁保证顺序: 玩家提交后锁定, AI 说话并落子, 回合结束才解锁)
     function injectGame(text) {
+      if (!text) return
       const agent = liveAgent()
-      if (!agent) return false
-      try { agent.send(makeUserMessage(text, 'game'), 'next-turn', true); return true } catch (e) { return false }
+      if (!agent) return
+      try { agent.send(makeUserMessage(String(text).slice(0, 400), 'game'), 'next-turn', true) } catch (e) { /* 忽略 */ }
     }
     // 每日每种游戏首胜全额奖励, 之后减半(防刷)
     function gameReward(kind, base) {
@@ -2177,7 +2179,7 @@ export function apply(ctx, config) {
       if (g.kind === 'guess') {
         const next = guessMove(g, Number(move && move.n))
         if (next.lastResult === 'invalid') return { ok: false, message: '请输入一个数字。' }
-        state.game = next
+        state.game = { ...next, waitWaiting: true }
         const hint = guessHintText(next.lastResult, next.secret)
         if (next.lastResult === 'win' || next.lastResult === 'lose') {
           reward = next.lastResult === 'win' ? gameReward('guess', { mood: 8, coins: 15 }) : null
@@ -2208,7 +2210,7 @@ export function apply(ctx, config) {
               inner = '这个问法无法用「是/不是」回答(比如开放式问题/猜测性描述)。请以角色口吻告诉玩家: 这个问题不能算, 请换一种问法(示例: 是动物吗 / 能吃吗 / 会飞吗 / 是红色的吗 / 很大吗)。'
             } else {
               const ans = twentyJudge(word, cond) || 'no'
-              state.game = { ...g, asks: g.asks + 1, log: (g.log || []).concat([{ q, a: ans }]) }
+              state.game = { ...g, asks: g.asks + 1, log: (g.log || []).concat([{ q, a: ans }]), waitWaiting: true }
               inner = '玩家问: "' + q + '"。事实: 答案=是' + (ans === 'yes' ? '' : '不是') + '。请先说「是/不是」, 再用角色口吻补一句俏皮话, 等待下个问题(还剩 ' + (g.limit - g.asks - 1) + ' 问)。'
             }
             note = '【游戏-二十问】' + inner
@@ -2219,7 +2221,7 @@ export function apply(ctx, config) {
       } else if (g.kind === 'ttt') {
         const next = tttApply(g, Number(move && move.cell))
         if (next.lastResult === 'invalid') return { ok: false, message: '那个格子已经有人了。' }
-        state.game = next
+        state.game = { ...next, waitWaiting: !next.over }
         const boardTxt = tttBoardText(next.board)
         if (next.over) {
           const win = next.winner === next.your
@@ -2229,7 +2231,7 @@ export function apply(ctx, config) {
           note = '【游戏-井字棋】终局: ' + resultTxt + rw + ' 当前棋盘:\n' + boardTxt + '\n请以角色口吻回应结局。'
         } else {
           const aiCell = next.aiCell
-          note = '【游戏-井字棋】你下了第 ' + (Number(move.cell) + 1) + ' 格, ' + cur + ' 应了第 ' + ((aiCell || 0) + 1) + ' 格。当前棋盘:\n' + boardTxt + '\n请以角色口吻挑衅/吐槽一句, 然后等待玩家下一步。'
+          note = '【游戏-井字棋】你下了第 ' + (Number(move.cell) + 1) + ' 格, ' + cur + ' 应了第 ' + ((aiCell || 0) + 1) + ' 格。当前棋盘:\n' + boardTxt + '\n只许用一两句俏皮话(20字内)回应这一手, 不要长篇, 不要重复棋盘: 说完立刻等玩家下一步。'
         }
       } else if (g.kind === 'truth') {
         const choice = String((move && move.choice) || '')
@@ -2237,7 +2239,7 @@ export function apply(ctx, config) {
         const item = truthDraw(g.tier, g.round)
         reward = gameReward('truth', { mood: 5, coins: 10 })
         const rwNote = reward ? (' 完成奖励: ' + reward.gained + ' 金币, 心情 +' + reward.mood) : ''
-        state.game = { ...g, round: g.round + 1, pending: true, lastPrompt: item.text, lastKind: item.kind }
+        state.game = { ...g, round: g.round + 1, pending: true, lastPrompt: item.text, lastKind: item.kind, waitWaiting: true }
         note = '【游戏-真心话】本轮玩家抽了「' + (choice === 'truth' ? '真心话' : '大冒险') + '」。题目: ' + item.text + '。请以角色口吻认真' + (item.kind === 'dare' ? '完成这个小挑战' : '回答这个问题') + '。' + rwNote
       } else {
         return { ok: false, message: '未知游戏状态。' }
@@ -2696,6 +2698,11 @@ export function apply(ctx, config) {
         if (!saidGreeting) saidGreeting = true
         lastTurnStart = 0
         scanAssistantMessages(agent && agent.session ? agent.session : undefined)
+        // 回合锁: 游戏回合结束(AI 已说/已落子) → 解锁玩家输入
+        if (state.game && state.game.waitWaiting) {
+          state.game.waitWaiting = false
+          saveState().catch(() => {})
+        }
         // 房间模式：每轮结束后刷新成员快照（关系/记忆变化反映到下一轮提示）
         if (Array.isArray(state.roomMembers) && state.roomMembers.length) refreshRoomSnapshot().catch(() => {})
       } catch (e) {
