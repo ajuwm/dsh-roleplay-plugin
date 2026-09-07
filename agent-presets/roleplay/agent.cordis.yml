@@ -271,16 +271,6 @@
       config:
         style: love
 
-# ---- desk pet ----
-# 持久化桌宠：桌面悬浮立绘窗口，文件 IPC + 会话注入 + 回复气泡。
-# 发布 `deskpet` 服务（getStatus/start/stop）供浏览器桥接控制启停。
-- id: deskpet
-  name: cordis:group
-  group: true
-  isolate:
-    deskpet: true
-  config:
-    - id: deskpet-host
-      name: './deskpet.js?gen=2'
-      config:
-        presetId: roleplay
+# ---- 桌宠已移至插件 bundle 补丁(host 平面) ----
+# 原因: 桌宠是工作区级桌面窗口(非会话级), 且曾以预设行形式导致整棵组合树
+# 挂载被拒(inactiveRows) → 恋爱向预设无法创建/无法挂载。见 cordis.patch.yml。
