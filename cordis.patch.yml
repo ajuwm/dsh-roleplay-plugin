@@ -10,3 +10,14 @@
 
     - id: roleplay-settings
       name: '@ajuwm/dsh-roleplay-plugin/settings'
+    - id: deskpet
+      name: cordis:group
+      group: true
+      isolate:
+        deskpet: true
+      config:
+        - id: deskpet-host
+          name: '@ajuwm/dsh-roleplay-plugin/deskpet'
+          config:
+            presetId: roleplay
+

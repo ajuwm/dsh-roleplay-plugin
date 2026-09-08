@@ -2,6 +2,13 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.16] - 桌宠模块正规修复: 移入 host 平面 + CJS→ESM(.mjs) + 存档 .bak 机制修复
+- **桌宠挂载根因补全(throwaway-profile 启动实测)**: 原 `deskpet.js` 是 CommonJS(`module.exports`/`require`), 但包内 `"type":"module"` → 按 ESM 解析 → `module is not defined in ES module scope` → 行加载失败拖垮挂载。修复: 重命名为 `deskpet.mjs` 并转为标准 ESM(`export default` + 顶层 `import os/path`)——物化目录(无 package.json)与包内两种上下文均按 ESM 加载。
+- **挂载位置**: 桌宠是工作区级桌面窗口, 从「恋爱向」预设组合树移到**插件的 bundle 补丁(host 平面)**, 行名 `@ajuwm/dsh-roleplay-plugin/deskpet`(新增 `./deskpet` 导出); 桥接 pet-status/start/stop 优先 `ctx.get('deskpet')`。
+- **存档 .bak 修复(3 预设)**: `fs.resolve` 返回的是解析对象(displayPath/targetKey), 旧代码 `target + '.bak'` 变成 `[object Object].bak` → 写盘报 `Cannot read properties of undefined (reading 'trim')`(终端里那条 `roleplay: backup failed`), 且「主存档损坏从 .bak 恢复」从未真正生效。修复: 对 `.bak` 路径走 resolveFile 重新解析。
+- **API 现代化**: 移除弃用 `ctx.timer`(timer.interval) → `ctx.interval`。
+- 全量测试 280/280; 独立 3081 端口启动验证桌宠行挂载成功。
+
 ## [1.5.15] - 恋爱向预设无法创建/挂载的根因: 预设组合树内嵌「桌宠」组拖垮整棵挂载 → 移出预设
 - **实证(浏览器复现)**: 新会话模式菜单点「恋爱向」→ 几秒内自动跳回「标准模式」(UI 静默回退); 同一实例点「朋友向」正常。
 - **真根因**: 恋爱向 = 朋友向(可挂载)+ 工程工具栈 + **桌宠组**; 桌宠是工作区级桌面窗口, 被写进会话级预设组合树后, 挂载期某行未激活 → DSH 挂载校验回滚整棵组合树 → 恋爱向预设创建失败/旧会话失去 roleplay 服务(「当前会话没有挂载角色扮演插件」)。

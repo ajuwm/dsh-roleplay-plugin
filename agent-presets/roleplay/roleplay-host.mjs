@@ -29,7 +29,6 @@ export function apply(ctx, config) {
     const agents = ctx.agents
     const fs = ctx.fs
     const systemPrompt = ctx.systemPrompt
-    const timer = ctx.timer
     const sandboxPolicy = ctx.sandboxPolicy
     const subprocess = ctx.subprocess
     const attachments = ctx.attachments
@@ -938,6 +937,7 @@ export function apply(ctx, config) {
     async function loadState() {
       try {
         const target = await resolveFile(REL_ROOT + '/character.json')
+          const targetBak = await resolveFile(REL_ROOT + '/character.json.bak')
         let parsed = null
         try {
           const info = await fs.stat(target)
@@ -945,8 +945,8 @@ export function apply(ctx, config) {
         } catch (e) {
           // 主存档损坏：尝试从 .bak 恢复
           try {
-            const info2 = await fs.stat(target + '.bak')
-            if (info2 !== undefined) { parsed = JSON.parse(await fs.readText(target + '.bak')); console.error('roleplay: 主存档损坏，已从 .bak 恢复') }
+            const info2 = await fs.stat(targetBak)
+            if (info2 !== undefined) { parsed = JSON.parse(await fs.readText(targetBak)); console.error('roleplay: 主存档损坏，已从 .bak 恢复') }
           } catch (e2) { parsed = null }
         }
         if (parsed) {
@@ -1041,7 +1041,7 @@ export function apply(ctx, config) {
             const info = await fs.stat(target)
             if (info !== undefined) {
               const cur = await fs.readText(target)
-              await fs.writeText(target + '.bak', cur, undefined, undefined, policyFor())
+              await fs.writeText(targetBak, cur, undefined, undefined, policyFor())
             }
           } catch (e) { console.error("roleplay: backup failed", e) }
           // 读合并：把其他实例已写入的追加型内容并入本内存态，防全量覆写丢增量
@@ -2640,7 +2640,7 @@ export function apply(ctx, config) {
 
     // ==================== 心跳引擎 ====================
 
-    timer.interval(() => { hbDiag.ticks++; maybeFireHeartbeat(new Date()) }, 60 * 1000)
+    ctx.interval(() => { hbDiag.ticks++; maybeFireHeartbeat(new Date()) }, 60 * 1000)
 
     // ==================== 事件监听 ====================
 
@@ -2721,7 +2721,7 @@ export function apply(ctx, config) {
       if (changed) await saveState()
     })
 
-    timer.interval(() => {
+    ctx.interval(() => {
       if (!stateLoaded || !state.enabled || !state.character) return
       scanAssistantMessages(currentSession())
     }, 20000)

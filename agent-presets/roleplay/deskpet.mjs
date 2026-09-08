@@ -1,7 +1,11 @@
 // 持久化桌宠插件 v11（HTTP 架构）：进程内 pending + DSH webServer 路由 + 会话事件轮询捕获。
 // 预设插件运行在 standing 纤维（无 ctx.agent）：目标会话按 preset id 从活跃根会话解析。
 // 对外：/pet/* HTTP 路由（窗口用）+ `deskpet` 服务（侧栏桥接用）。
-module.exports = {
+// ES 模块(.mjs): 包内"type":"module"与物化目录(无 package.json)两种上下文均按 ESM 加载。
+import os from 'node:os'
+import path from 'node:path'
+
+export default {
   name: 'deskpet',
   inject: ['agents', 'subprocess', 'timer', 'fs', 'sandboxPolicy', 'webServer'],
   apply(ctx, config) {
@@ -15,7 +19,6 @@ module.exports = {
     // ⚠ 关键：sandboxPolicy.workspaceRoot 是 DSH 进程启动目录（宿主组合里配置为 process.cwd()，
     // 例如在 C:\Program Files\nodejs 里执行 "dsh web" 时），并不等于会话工作区！
     // 必须优先用目标会话的 header.cwd（与 roleplay-host.mjs 的 workspaceRoot() 同一口径）。
-    const os = require('node:os'), path = require('node:path')
     function workspaceRoot() {
       try {
         if (targetSessionId) {
