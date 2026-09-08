@@ -10,11 +10,11 @@
 
     - id: roleplay-settings
       name: '@ajuwm/dsh-roleplay-plugin/settings'
+    # 桌宠(host 平面): 服务直接挂在根 ctx(不加 isolate 私有域——桥接 ctx.get('deskpet') 才能读到;
+    # 预设时代的 isolate 域会让宿主侧找不到服务, 侧栏桌宠区报 未挂载)
     - id: deskpet
       name: cordis:group
       group: true
-      isolate:
-        deskpet: true
       config:
         - id: deskpet-host
           name: '@ajuwm/dsh-roleplay-plugin/deskpet'

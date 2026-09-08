@@ -2,6 +2,10 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.17] - 桌宠无法启动: host 平面行沿用了预设时代的 isolate 私有域, 桥接 ctx.get('deskpet') 读不到 → 侧栏「未挂载」/启动无效
+- 修复: bundle 补丁中的桌宠组去掉 `isolate: { deskpet: true }`(服务直接挂根 ctx, 桥接与面板可见可控制)
+- 另注: 桌宠窗口默认自启还受工作区 `pet/config.json` 的 enabled 开关控制(当前为 false)——主实例重启后可在侧栏点「启动桌宠」, 或手动把 enabled 置 true。
+
 ## [1.5.16] - 桌宠模块正规修复: 移入 host 平面 + CJS→ESM(.mjs) + 存档 .bak 机制修复
 - **桌宠挂载根因补全(throwaway-profile 启动实测)**: 原 `deskpet.js` 是 CommonJS(`module.exports`/`require`), 但包内 `"type":"module"` → 按 ESM 解析 → `module is not defined in ES module scope` → 行加载失败拖垮挂载。修复: 重命名为 `deskpet.mjs` 并转为标准 ESM(`export default` + 顶层 `import os/path`)——物化目录(无 package.json)与包内两种上下文均按 ESM 加载。
 - **挂载位置**: 桌宠是工作区级桌面窗口, 从「恋爱向」预设组合树移到**插件的 bundle 补丁(host 平面)**, 行名 `@ajuwm/dsh-roleplay-plugin/deskpet`(新增 `./deskpet` 导出); 桥接 pet-status/start/stop 优先 `ctx.get('deskpet')`。
