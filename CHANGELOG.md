@@ -7,7 +7,8 @@
 - **挂载位置**: 桌宠是工作区级桌面窗口, 从「恋爱向」预设组合树移到**插件的 bundle 补丁(host 平面)**, 行名 `@ajuwm/dsh-roleplay-plugin/deskpet`(新增 `./deskpet` 导出); 桥接 pet-status/start/stop 优先 `ctx.get('deskpet')`。
 - **存档 .bak 修复(3 预设)**: `fs.resolve` 返回的是解析对象(displayPath/targetKey), 旧代码 `target + '.bak'` 变成 `[object Object].bak` → 写盘报 `Cannot read properties of undefined (reading 'trim')`(终端里那条 `roleplay: backup failed`), 且「主存档损坏从 .bak 恢复」从未真正生效。修复: 对 `.bak` 路径走 resolveFile 重新解析。
 - **API 现代化**: 移除弃用 `ctx.timer`(timer.interval) → `ctx.interval`。
-- 全量测试 280/280; 独立 3081 端口启动验证桌宠行挂载成功。
+- **落地修正(3081 端口启动实测+多次迭代)**: ① 桌宠行挂到 host 平面后, `ctx.interval`/`ctx.on`/`ctx.effect` 与全局 `setInterval` 在该上下文均不可用(报 `X(...)(...) is not a function` / `setInterval(...) is not a function`)——**原预设内为什么挂载失败: 桌宠代码早年写死在全局 API/旧 ctx 用法上, 与当前 cordis/timer 运行时契约不符**; ② 已按 DSH 运行时真实情况落地: 保留 `ctx.interval`(timer mixin, 唯一可用) + apply 内捕获 `sandboxPolicy`(避免异步后 'inactive context' 代理失效) + 移除 `ctx.on('dispose')`/`ctx.effect` 清理钩子与空窗重置 IIFE(与该上下文不兼容, 清理交给进程生命周期); ③ 3081 实例实测: 桌宠行挂载成功、`startNotes` 拉起纸条窗、web 200。
+- 全量测试保持 280/280; 独立 3081 端口启动验证桌宠行挂载成功。
 
 ## [1.5.15] - 恋爱向预设无法创建/挂载的根因: 预设组合树内嵌「桌宠」组拖垮整棵挂载 → 移出预设
 - **实证(浏览器复现)**: 新会话模式菜单点「恋爱向」→ 几秒内自动跳回「标准模式」(UI 静默回退); 同一实例点「朋友向」正常。

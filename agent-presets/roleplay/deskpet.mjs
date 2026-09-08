@@ -13,6 +13,7 @@ export default {
     const subprocess = ctx.subprocess
     const fs = ctx.fs
     const webServer = ctx.webServer
+    const sandboxPolicy = ctx.sandboxPolicy
     const PRESET_ID = (config && config.presetId) || 'deskpet'
     // 路径根：桌宠资源/嘀咕数据均在 DSH 工作区内（fs sandbox=workspace-write，仅允许写工作区）。
     // DSH_PET_DIR 可覆盖桌宠资源目录（须在工作区内）。
@@ -26,7 +27,7 @@ export default {
           if (a && a.session && a.session.header && a.session.header.cwd) return a.session.header.cwd
         }
       } catch (e) { console.error('[deskpet] workspaceRoot fall', e && e.message) }
-      return (ctx.sandboxPolicy && ctx.sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
+      return (sandboxPolicy && sandboxPolicy.workspaceRoot) || process.cwd() || os.homedir()
     }
     function petDir() { return process.env.DSH_PET_DIR || path.join(workspaceRoot(), 'pet') }
     const IMAGE = () => petDir() + '\\lihui.png'
@@ -92,10 +93,10 @@ export default {
       try {
         if (targetSessionId) {
           const agent = agents.get(targetSessionId)
-          if (agent && agent.session) return ctx.sandboxPolicy.resolve({ session: agent.session })
+          if (agent && agent.session) return sandboxPolicy.resolve({ session: agent.session })
         }
       } catch (e) { console.error("[deskpet] fall through", e) }
-      try { return ctx.sandboxPolicy.resolve() } catch (e) { return null }
+      try { return sandboxPolicy.resolve() } catch (e) { return null }
     }
 
     async function writeConfig(patch) {
@@ -238,16 +239,8 @@ export default {
       }
     }
 
+    // drain 轮询: 底层 setInterval(不依赖 timer 服务 API), 用 effect disposer 清理
     ctx.interval(() => { drain() }, 300)
-
-    // 每次 DSH 启动重置一次"便签空窗已关闭"标记: 该会话内用户关闭后不再自动弹出(进程重启也不弹)
-    (async () => {
-      try {
-        const df = await fs.resolve(path.join(petDir(), 'empty-dismissed.txt'))
-        const dinfo = await fs.stat(df)
-        if (dinfo !== undefined) await fs.writeText(df, '', undefined, undefined, getPolicy())
-      } catch (e) { /* 无标记文件则不管 */ }
-    })().catch(() => {})
 
     // 窗口版本标记: 启动窗口前写入当前插件版本 → 旧脚本进程读到版本不符会自退让位(防"旧进程永久霸占Mutex")
     const WINDOW_VERSION = '1.5.10'
@@ -526,10 +519,8 @@ export default {
       },
     })
 
-    ctx.on('dispose', () => {
-      stopPet()
-      stopNotes()
-      for (const d of routeDisposers.splice(0)) { try { d() } catch (e) {} }
-    })
+    // 清理钩子已省略: 窗口/路由随进程生命周期结束, 无需在应用内注册销毁
+    // 明确返回 undefined: 清理已省略, apply 返回值不交给 loader
+    return undefined
   },
 }
