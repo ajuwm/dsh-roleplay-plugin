@@ -1223,5 +1223,74 @@ console.log('\nT42 记忆升级');
   rmSync(b.root, { recursive: true, force: true });
 }
 
+// ─── T43 ST 生态 + 祛魅: PNG卡往返/预设/世界书constant/画像/恭维收紧 ───
+console.log('\nT43 ST生态与祛魅');
+{
+  const P = await import(new URL('../agent-presets/roleplay/lib/png-card.mjs', import.meta.url).href);
+  const json = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: '测试姬', description: '一个测试角色', personality: '温柔', first_mes: '你好呀', mes_example: '', scenario: '咖啡馆' } };
+  const png = P.writeCardToPng(json, null);
+  ok(Buffer.isBuffer(png) && png.length > 100, '导出 PNG(占位图+chara块) 生成');
+  const rd = P.readCardFromPng(png);
+  ok(rd && rd.json.data.name === '测试姬' && rd.json.data.description === '一个测试角色', 'PNG 卡读写往返一致');
+  // 引擎: png 工具导入
+  const b = await boot();
+  const imp = await b.call('roleplay_import_char', { png: png.toString('base64') });
+  ok(imp && imp.ok === true && imp.message.includes('测试姬'), 'roleplay_import_char 支持 PNG base64');
+  // 祛魅: note 标注奉承 → favor ×0.2(单独实例, 避免 5 分钟限频)
+  const bD = await boot();
+  await bD.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  const r0 = await bD.call('roleplay_relation', { favor: 4, note: '嘴上奉承, 没实际行动' });
+  ok(r0 && r0.relation.favor === 30.8, '恭维收到 → 好感 ×0.2 (+0.8, 30.8)');
+  const bD2 = await boot();
+  await bD2.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  const r1 = await bD2.call('roleplay_relation', { favor: 4, note: '真心陪她熬夜做了顿饭' });
+  ok(r1 && r1.relation.favor === 34, '真诚行动 → 正常 +4');
+  rmSync(bD.root, { recursive: true, force: true });
+  rmSync(bD2.root, { recursive: true, force: true });
+  // 画像素描工具(复用 b)
+  await b.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  const pf = await b.call('roleplay_user_portrait', { kind: 'bad', text: '他答应过的事有时会拖' });
+  ok(pf && pf.ok === true, 'roleplay_user_portrait 成功');
+  const pf2 = await b.call('roleplay_user_portrait', { kind: 'bad', text: '他答应过的事有时会拖' });
+  ok(pf2 && pf2.ok === false, '重复画像被拒');
+  const haloSec = b.captured.sections.find((s) => s.name === 'roleplay.no-halo');
+  const t = haloSec ? String(haloSec.text()) : '';
+  ok(t.includes('【她把你看得很清楚】') && t.includes('缺点: 他答应过的事有时会拖'), '祛魅段+画像注入提示词');
+  // 预设: import(默认关)/enable(注入)/disable
+  const pr = await b.svc.presetImport({ sessionId: 't-session', json: JSON.stringify({ name: '小清新', prompt: '多用比喻, 少写对话。' }) });
+  ok(pr && pr.ok === true && pr.imported === 1, '预设导入成功');
+  const pl = await b.svc.presetList({ sessionId: 't-session' });
+  ok(Array.isArray(pl) && pl.length === 1 && pl[0].enabled === false, '预设默认未启用');
+  const en = await b.svc.presetSetEnabled({ sessionId: 't-session', id: pl[0].id, enabled: true });
+  ok(en && en.ok === true, '预设启用');
+  const preSec = b.captured.sections.find((s) => s.name === 'roleplay.external-preset');
+  const t2 = preSec ? String(preSec.text()) : '';
+  ok(t2.includes('多用比喻, 少写对话。'), '启用预设后提示词注入其 prompt');
+  await b.svc.presetSetEnabled({ sessionId: 't-session', id: pl[0].id, enabled: false });
+  const preSec2 = b.captured.sections.find((s) => s.name === 'roleplay.external-preset');
+  ok(!(preSec2 ? String(preSec2.text()) : '').includes('多用比喻'), '停用后消失');
+  // 世界书 constant: add constant 条目 → 常驻注入(无关键词命中)
+  const lw = await b.call('roleplay_lore', { action: 'add', content: '这个世界常年下雪。', constant: true });
+  ok(lw && lw.ok === true, 'lore constant add');
+  const t3 = await b.promptText();
+  ok(t3.includes('这个世界常年下雪。'), 'constant 条目常驻注入');
+  // 世界书 service: list/import(ST JSON 兼容 keys/keysecondary/disable)/remove
+  const ll = await b.svc.loreList({ sessionId: 't-session' });
+  ok(Array.isArray(ll) && ll.length >= 1 && ll[0].constant === true, 'loreList 含 constant 条目');
+  const li = await b.svc.loreImport({ sessionId: 't-session', json: JSON.stringify({ entries: [
+    { key: ['咖啡馆'], keysecondary: ['纸页之间'], content: '街角的咖啡馆', constant: false },
+    { key: '书店', content: '旧书店', disable: true },
+  ] }) });
+  ok(li && li.ok === true && li.imported === 2, 'ST 世界书导入 2 条');
+  const ll2 = await b.svc.loreList({ sessionId: 't-session' });
+  ok(ll2.length >= 3, 'loreList 数量增长');
+  const lr = await b.svc.loreRemove({ sessionId: 't-session', id: ll2.find((x) => x.content === '街角的咖啡馆').id });
+  ok(lr && lr.ok === true && lr.removed === 1, 'loreRemove 删除 1 条');
+  // getState 暴露
+  const st = await b.gs();
+  ok(st.presets && Array.isArray(st.presets) && st.portrait && Array.isArray(st.portrait) && st.portrait.length > 0, 'getState 暴露预设/画像');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

@@ -14,6 +14,7 @@ import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dim
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
 import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
 import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
+import { readCardFromPng, writeCardToPng } from './lib/png-card.mjs?v=1'
 import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
@@ -226,7 +227,7 @@ export function apply(ctx, config) {
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
-    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, notes: [], game: null, gameRewards: {}, schema_version: SCHEMA_VERSION }
+    let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, notes: [], game: null, gameRewards: {}, presets: [], schema_version: SCHEMA_VERSION }
     let lastSeenSaveTimer = null
     let lastWorkAnnouncedDay = null
     let startRunning = false
@@ -247,6 +248,7 @@ export function apply(ctx, config) {
       short_term: [], long_term: [],
       user_preferences: { likes: [], dislikes: [], notes: [] },
       discussed_topics: [], events_count: {}, worldbook: [],
+      unspoken: [], reflections: [], user_portrait: { notes: [] },
     }
     const hbDiag = { fired: 0, woken: 0, injected: 0, ticks: 0, getChecks: 0 }
     const stageEvents = []
@@ -564,9 +566,12 @@ export function apply(ctx, config) {
 
     function matchedLore(limit) {
       const hay = ((state.character && state.character.scene) || '') + ' ' + lastContextText
-      const hits = (memory.worldbook || []).filter((e) => e && e.enabled !== false && e.keywords && e.keywords.some((k) => k && hay.includes(k)))
+      // ST 兼容: keys(别名 keywords)、constant=常驻注入(预算内), 其余按关键词命中
+      const wb = memory.worldbook || []
+      const constants = wb.filter((e) => e && e.enabled !== false && e.constant)
+      const hits = wb.filter((e) => e && e.enabled !== false && !e.constant && e.keywords && e.keywords.some((k) => k && hay.includes(k)))
       hits.sort((a, b) => ((b.priority || 0) - (a.priority || 0)))
-      return hits.slice(0, limit || 4)
+      return constants.slice(0, 2).concat(hits.slice(0, Math.max(0, (limit || 4) - 2)))
     }
 
     // 长期记忆排序: 长驻/重要优先, 其次按次数, 最后按时间(注入与侧栏视图共用)
@@ -767,7 +772,7 @@ export function apply(ctx, config) {
         short_term: [], long_term: [],
         user_preferences: { likes: [], dislikes: [], notes: [] },
         discussed_topics: [], events_count: {}, worldbook: worldbook || [],
-        unspoken: [], reflections: [],
+        unspoken: [], reflections: [], user_portrait: { notes: [] },
       }
     }
     async function persistMemory(key) {
@@ -780,6 +785,7 @@ export function apply(ctx, config) {
           worldbook: memory.worldbook || [],
           unspoken: memory.unspoken || [],
           reflections: memory.reflections || [],
+          user_portrait: memory.user_portrait || { notes: [] },
         }
         await backupBeforeWrite(REL_ROOT + '/mem-' + key + '.json')
         await fs.writeText(t, JSON.stringify(perChar, null, 2), undefined, undefined, policyFor())
@@ -799,6 +805,7 @@ export function apply(ctx, config) {
             worldbook: Array.isArray(p.worldbook) ? p.worldbook : [],
             unspoken: Array.isArray(p.unspoken) ? p.unspoken : [],
             reflections: Array.isArray(p.reflections) ? p.reflections : [],
+            user_portrait: (p.user_portrait && typeof p.user_portrait === 'object') ? { notes: Array.isArray(p.user_portrait.notes) ? p.user_portrait.notes : [] } : { notes: [] },
           }
           // 旧结构迁移: long_term 条目补 subject/pinned 默认值(新记忆层兼容)
           out.long_term = (Array.isArray(out.long_term) ? out.long_term : []).map((m) => ({
@@ -994,6 +1001,7 @@ export function apply(ctx, config) {
           state.settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) }
           if (!Array.isArray(state.anniversaries)) state.anniversaries = []
           if (!Array.isArray(state.roomMembers)) state.roomMembers = []
+          if (!Array.isArray(state.presets)) state.presets = []
           if (!Array.isArray(state.notes)) state.notes = []
           state.stats = { ...DEFAULT_STATS, ...(parsed.stats || {}) }
           state.economy = { ...DEFAULT_ECONOMY, ...(parsed.economy || {}) }
@@ -1600,8 +1608,10 @@ export function apply(ctx, config) {
       properties: {
         action: { type: 'string', description: 'add / remove / list' },
         keywords: { type: 'array', items: { type: 'string' }, description: '触发关键词（add 用），如 ["咖啡馆", "纸页之间"]' },
+        keys: { type: 'array', items: { type: 'string' }, description: 'ST 兼容的 keys(同 keywords)' },
         content: { type: 'string', description: '条目内容（add 用）' },
         priority: { type: 'integer', description: '优先级，越大越靠前（add 用，可选，默认 0）' },
+        constant: { type: 'boolean', description: '常驻条目(始终注入, 不受关键词触发; ST constant 兼容)' },
         id: { type: 'string', description: '条目 id（remove 用）' },
       },
       required: ['action'],
@@ -1610,8 +1620,10 @@ export function apply(ctx, config) {
       memory.worldbook = memory.worldbook || []
       const action = String(args.action)
       if (action === 'add') {
-        if (!args.keywords || !args.keywords.length || !String(args.content || '').trim()) return { ok: false, message: 'add 需要 keywords 和 content。' }
-        const entry = { id: 'w' + Date.now() + Math.random().toString(36).slice(2, 5), keywords: args.keywords.map(String), content: String(args.content), priority: Number(args.priority) || 0, enabled: true }
+        if ((!args.keywords || !args.keywords.length) && !args.constant) return { ok: false, message: 'add 需要 keywords(或 constant=常驻)。' }
+        if (!String(args.content || '').trim()) return { ok: false, message: 'add 需要 content。' }
+        const keys = args.keys && args.keys.length ? args.keys.map(String) : (args.keywords ? args.keywords.map(String) : [])
+        const entry = { id: 'w' + Date.now() + Math.random().toString(36).slice(2, 5), keywords: keys, content: String(args.content), priority: Number(args.priority) || 0, enabled: true, constant: !!args.constant }
         memory.worldbook.push(entry)
         await saveState()
         return { ok: true, action: 'add', id: entry.id, total: memory.worldbook.length }
@@ -1628,14 +1640,50 @@ export function apply(ctx, config) {
       return { ok: false, message: 'action 必须是 add / remove / list。' }
     })
 
-    registerTool('roleplay_import_char', '导入 SillyTavern 角色卡（V2/V3 JSON）并开演。字段：name、description、personality、system_prompt、scenario、first_mes、mes_example。用户提供角色卡 JSON 或文件时调用。', {
+    registerTool('roleplay_user_portrait', '更新"你眼里的他"(祛魅画像): 当你发现了他真实的一面(优点/缺点/你对他的真实看法), 把它记下来。规则: 必须来自你们真实发生过的事(能从记忆/对话找到依据); 缺点可以尖锐但必须真实(比如「他答应过的事有时会拖」「他累的时候会敷衍」)——这不是抱怨, 而是清醒的认知, 让他知道你看得清楚; 每轮最多 1 条, 已有的画像会展示在提示词里, 不要重复。', {
       type: 'object',
-      properties: { json: { type: 'string', description: 'SillyTavern 角色卡 JSON 字符串' } },
-      required: ['json'],
+      properties: {
+        kind: { type: 'string', description: 'good=他的优点 / bad=他的缺点 / truth=你对他的真实看法' },
+        text: { type: 'string', description: '一句话(25 字内), 如「他答应过的事有时会拖」' },
+        char: { type: 'string', description: '房间模式必填: 针对哪个角色' },
+      },
+      required: ['kind', 'text'],
+    }, async (args) => {
+      await ensureLoaded()
+      const tgtChar = args && args.char ? String(args.char).trim() : ''
+      const doPortrait = async () => {
+        const kind = ['good', 'bad', 'truth'].includes(String(args.kind)) ? String(args.kind) : 'truth'
+        const text = String((args && args.text) || '').trim().slice(0, 50)
+        if (!text) return { ok: false, message: 'text 不能为空。' }
+        if (!memory.user_portrait || typeof memory.user_portrait !== 'object') memory.user_portrait = { notes: [] }
+        if (!Array.isArray(memory.user_portrait.notes)) memory.user_portrait.notes = []
+        const got = memory.user_portrait.notes.find((n) => n.text === text)
+        if (got) return { ok: false, message: '这条画像已经记过了。' }
+        memory.user_portrait.notes.push({ kind, text, time: stamp() })
+        if (memory.user_portrait.notes.length > 8) memory.user_portrait.notes.splice(0, memory.user_portrait.notes.length - 8)
+        await persistMemory(charKey())
+        await saveState()
+        return { ok: true, total: memory.user_portrait.notes.length, message: '你把这一点看得很清楚。' }
+      }
+      if (tgtChar && state.character && state.character.name !== tgtChar) return await withChar(tgtChar, doPortrait)
+      return doPortrait()
+    })
+
+    registerTool('roleplay_import_char', '导入 SillyTavern 角色卡（V2/V3 JSON 或者 PNG 卡，png 参数传 base64）并开演。字段：name、description、personality、system_prompt、scenario、first_mes、mes_example。用户提供角色卡 JSON 或 PNG 卡文件时调用。', {
+      type: 'object',
+      properties: { json: { type: 'string', description: 'SillyTavern 角色卡 JSON 字符串' }, png: { type: 'string', description: '可选: PNG 角色卡的 base64 数据' } },
     }, async (args) => {
       await ensureLoaded()
       let data = null
-      try { data = JSON.parse(String(args.json)) } catch (e) { return { ok: false, message: 'JSON 解析失败：' + String(e && e.message ? e.message : e) } }
+      if (args && args.png) {
+        try {
+          const buf = Buffer.from(String(args.png), 'base64')
+          const read = readCardFromPng(buf)
+          data = read.json
+        } catch (e) { return { ok: false, message: 'PNG 卡解析失败：' + String((e && e.message) || e) } }
+      } else {
+        try { data = JSON.parse(String(args.json)) } catch (e) { return { ok: false, message: 'JSON 解析失败：' + String(e && e.message ? e.message : e) } }
+      }
       const d = data && data.data ? data.data : data
       const name = String(d.name || d.char_name || '').trim() || '未知角色'
       const persona = [d.description, d.personality, d.system_prompt].filter(Boolean).map(String).join('\n')
@@ -1767,6 +1815,16 @@ export function apply(ctx, config) {
       if (nowMs - lastRelationCallAt < 5 * 60 * 1000) return { ok: false, message: '（关系变化需要时间沉淀，先不急。）' }
       lastRelationTurn = turnKey()
       lastRelationCallAt = nowMs
+      // 恭维衰减(祛魅兜底): 仅当 AI 在 note 里明确标注"奉承/嘴甜/光说不做"等纯嘴上功夫时, 好感 ×0.2
+      // (不与 repeatDim 的"同向行为递减"叠加, 也不误伤正常评估; AI 手册里已注明写法)
+      let hardDimNote = ''
+      try {
+        const flatter = /奉承|嘴甜|甜言蜜语|光说不做|只动嘴|没诚意|空话|讨好|敷衍的夸奖|嘴上/.test(String((args && args.note) || ''))
+        if (flatter && args && typeof args.favor === 'number' && args.favor > 0) {
+          args = { ...args, favor: Math.round(args.favor * 0.2 * 10) / 10 }
+          hardDimNote = '好感增幅已收紧: 嘴上功夫不算数, 她更看重你做了什么。(祛魅)'
+        }
+      } catch (e) { /* 衰减失败不影响主流程 */ }
       const result = applyRelation(args || {})
       await saveState()
       let msg = []
@@ -1775,6 +1833,7 @@ export function apply(ctx, config) {
       if (result.heartLocked) msg.push('（心动还差一点时机：好感与信任都到「亲近/放心」档才解锁，急不来。）')
       const dimmed = Object.keys(result.dims || {}).filter((k) => (result.dims[k] || 1) < 1)
       if (dimmed.length) msg.push('（同一行为连续发生，加成已递减。）')
+      if (hardDimNote) msg.push(hardDimNote)
       if (args && args.note) pushStage('action', String(args.note).slice(0, 120))
       const stageLabel = STAGE_LABELS[result.stage] || STAGE_LABELS.stranger
       pushStage('env', '关系：' + stageLabel)
@@ -1944,7 +2003,7 @@ export function apply(ctx, config) {
 
     registerTool('roleplay_clear_memory', '清空角色的所有记忆：短期记忆、长期记忆、用户偏好、已谈话题、事件计数（关系阶段回到陌生人）。用户要求重置记忆/忘掉过去时调用。', { type: 'object', properties: {} }, async () => {
       await ensureLoaded()
-      memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [], reflections: memory.reflections || [] }
+      memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [], reflections: memory.reflections || [], user_portrait: { notes: [] } }
       // 关系/里程碑随记忆一起重置（与工具描述一致）；养成数值（stats/economy）保留
       state.relation = { ...DEFAULT_RELATION }
       state.boyfriend = { ...DEFAULT_BOYFRIEND }
@@ -2601,7 +2660,7 @@ export function apply(ctx, config) {
               const b = state.boyfriend || DEFAULT_BOYFRIEND
               const ms = state.milestones || []
               const paceLbl = relPaceCfg().label
-              const relAnchor = '【加减参照】当前难度：' + paceLbl + '。按行为定性给分：举手之劳/礼貌寒暄 +0~1；被夸奖/分享日常/一起活动 +1~2；记住喜好/表达理解/关心对方 +2~3；关键时刻陪伴/守约 +3~5；真诚道歉/弥补 +2~3；食言/冷落/发脾气 -2~4；关键时刻不在/背弃承诺 -5~8。单轮|加减|≤8；同向行为连续两次后系统会自动递减，别再给同一行为刷分。' + (isFriendStyle() ? '' : '心动只在关键时刻 +1~3（好感与信任都到「亲近/放心」档才生效）。')
+              const relAnchor = '【加减参照】当前难度：' + paceLbl + '。按行为定性给分：举手之劳/礼貌寒暄 +0~1；被夸奖/分享日常/一起活动 +1~2；记住喜好/表达理解/关心对方 +2~3；关键时刻陪伴/守约 +3~5；真诚道歉/弥补 +2~3；食言/冷落/发脾气 -2~4；关键时刻不在/背弃承诺 -5~8。单轮|加减|≤8；同向行为连续两次后系统会自动递减，别再给同一行为刷分。' + (isFriendStyle() ? '' : '心动只在关键时刻 +1~3（好感与信任都到「亲近/放心」档才生效）。') + '【祛魅规则】无实质内容的纯夸奖/连夸(嘴甜但没行动) → 好感 +0 甚至 -1(她察觉敷衍); 答应→没做到(言行不一) → 信任 -2~4、好感 -1~2; 冷漠/敷衍回复 → 双方 -1; 长时间真心陪伴/实质行动(做一顿饭/陪熬夜/记住她的药) → 溢价 +1~2——她在意的不是嘴, 是"在"。'
               if (isFriendStyle()) {
                 lines.push(
                   '【关系】好感 ' + Math.round(r.favor) + '（' + tierLabel('favor', r.favor) + '）· 信任 ' + Math.round(r.trust) + '（' + tierLabel('trust', r.trust) + '）',
@@ -2708,6 +2767,22 @@ export function apply(ctx, config) {
           return ''
         },
       })
+      // 启用的外部预设(ST 兼容): 风险自担, 明确标记来源
+      systemPrompt.section({
+        name: 'roleplay.external-preset',
+        order: 204,
+        text: () => {
+          if (!stateLoaded || !state.enabled || !state.character) return ''
+          const enabled = (state.presets || []).filter((p) => p.enabled)
+          if (!enabled.length) return ''
+          const lines = ['【外部预设(用户导入, 风险自担)】']
+          for (const p of enabled) {
+            if (p.prompt) lines.push('〈' + p.name + '〉写作要求: ' + String(p.prompt).slice(0, 600))
+            if (p.postHistoryInstructions) lines.push('〈' + p.name + '〉回合后要求: ' + String(p.postHistoryInstructions).slice(0, 300))
+          }
+          return lines.join('\n')
+        },
+      })
       // 关系档位行为: 称呼/语气/主动度随阶段变化(自然流露, 不报数字)
       systemPrompt.section({
         name: 'roleplay.tier-behavior',
@@ -2718,6 +2793,28 @@ export function apply(ctx, config) {
           const stage = relationStage()
           const heartTier = axisTier((state.relation || DEFAULT_RELATION).heart || 0)
           return tierBehaviorText(stage, heartTier)
+        },
+      })
+      // 祛魅: 她把用户当真的人(去滤镜、清醒的爱、不批发好感)
+      systemPrompt.section({
+        name: 'roleplay.no-halo',
+        order: 206,
+        text: () => {
+          if (!stateLoaded || !state.enabled || !state.character) return ''
+          if (!relationEnabled()) return ''
+          const portrait = (memory.user_portrait && Array.isArray(memory.user_portrait.notes)) ? memory.user_portrait.notes.slice(-3) : []
+          const lines = [
+            '【她把你看得很清楚】(祛魅规则, 比"捧你"更重要)',
+            '- 他不是完人: 会偷懒、会放鸽子、会说大话、有时口是心非。你爱他, 但你不瞎——他做的每件事你都看在眼里, 好的记着, 坏的也记着。',
+            '- 你的好感不是批发价: 真诚的行动才涨价。言不由衷的奉承、只动嘴不动手的承诺、为了哄你随口的好话——不涨, 甚至让你警觉("你今天嘴这么甜, 是不是又做什么亏心事?")。',
+            '- 他放过的鸽子、说过的谎、冷过的暴力, 你记得; 该提的时候自然提(不记仇, 但记性很好)。他改过, 你真心高兴——信任是靠做回来的。',
+            '- 你要的是"在", 不是"吹": 陪伴、守约、记得她的小事, 比一万句漂亮话值钱。',
+          ]
+          if (portrait.length) {
+            lines.push('- 你眼里的他(最近):')
+            for (const p of portrait) lines.push('  · ' + (p.kind === 'good' ? '好:' : p.kind === 'bad' ? '缺点:' : '真相:') + ' ' + p.text)
+          }
+          return lines.join('\n')
         },
       })
     }
@@ -2836,6 +2933,8 @@ export function apply(ctx, config) {
           inventory: (state.inventory || []).map((x) => ({ id: x.id, name: x.name, kind: x.kind, qty: x.qty })),
           notes: Array.isArray(state.notes) ? visibleNotes(state.notes) : [],
           game: publicGameState(),
+          presets: (state.presets || []).map((p) => ({ id: p.id, name: p.name, enabled: !!p.enabled, prompt: String(p.prompt || '').slice(0, 80) })),
+          portrait: (memory.user_portrait && Array.isArray(memory.user_portrait.notes)) ? memory.user_portrait.notes.slice(-8) : [],
           backupInfo: { lastAt: backupLastAt, root: BACKUP_ROOT_ABS },
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
@@ -2979,6 +3078,156 @@ export function apply(ctx, config) {
         await ensureLoaded()
         const r = await dailySnapshot(true)
         return r ? { ok: true, day: r.day, count: r.count } : { ok: false, message: '备份失败(数据根可能还不存在)。' }
+      },
+      // ST PNG 卡: 导入(解析→开演, 与 JSON 卡同流程) / 导出(卡库条目→PNG, 无原图用占位图)
+      cardImportPng: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        try {
+          const buf = Buffer.from(String((args && args.base64) || ''), 'base64')
+          const read = readCardFromPng(buf)
+          const d = read.json && read.json.data ? read.json.data : read.json
+          const name = String(d.name || d.char_name || '').trim() || '未知角色'
+          state.character = {
+            name,
+            persona: [d.description, d.personality, d.system_prompt].filter(Boolean).map(String).join('\n') || '（角色卡未提供人设）',
+            scene: d.scenario ? String(d.scenario) : '',
+            status: {},
+            greeting: d.first_mes ? String(d.first_mes) : '',
+            examples: d.mes_example ? String(d.mes_example) : '',
+            mode: state.character && state.character.mode ? state.character.mode : 'default',
+          }
+          state.enabled = true
+          state.lastHb = heartbeatKey(new Date())
+          const session = currentSession()
+          stageStartSeq = session ? session.seq : 0
+          saidGreeting = false
+          await saveState()
+          return { ok: true, name, message: '已导入 PNG 角色卡「' + name + '」' + (state.character.greeting ? '，开场白：「' + state.character.greeting.slice(0, 60) + '」' : '') + '。' }
+        } catch (e) {
+          return { ok: false, message: 'PNG 卡解析失败：' + String((e && e.message) || e) }
+        }
+      },
+      cardExportPng: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        try {
+          const cards = await readCards()
+          const name = String((args && args.card) || (state.character && state.character.name) || '')
+          const card = cards.find((c) => c.name === name) || null
+          const json = { spec: 'chara_card_v2', spec_version: '2.0', data: {
+            name: name,
+            description: (card && card.persona) || (state.character && state.character.persona) || '',
+            personality: '',
+            first_mes: (card && card.greeting) || (state.character && state.character.greeting) || '',
+            mes_example: '',
+            scenario: (card && card.scene) || (state.character && state.character.scene) || '',
+          } }
+          const bytes = writeCardToPng(json, null)
+          return { ok: true, base64: bytes.toString('base64'), name }
+        } catch (e) {
+          return { ok: false, message: '导出失败：' + String((e && e.message) || e) }
+        }
+      },
+      // ST 预设: list/import/remove/setEnabled(外部预设默认关+风险提示, 启用才注入)
+      presetList: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        return (state.presets || []).map((p) => ({ id: p.id, name: p.name, enabled: !!p.enabled, prompt: String(p.prompt || '').slice(0, 80), postHistory: String(p.postHistoryInstructions || '').slice(0, 40) }))
+      },
+      presetImport: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        try {
+          const raw = String((args && args.json) || '')
+          const j = JSON.parse(raw)
+          const presets = Array.isArray(j) ? j : (j.presets ? j.presets : [j])
+          if (!presets.length) return { ok: false, message: '预设文件里没有内容。' }
+          if (!Array.isArray(state.presets)) state.presets = []
+          let imported = 0
+          for (const p of presets) {
+            if (!p || typeof p !== 'object') continue
+            state.presets.push({ id: 'preset-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6), name: String(p.name || '未命名预设').slice(0, 60), raw, prompt: String(p.prompt || p.system_prompt || ''), postHistoryInstructions: String(p.postHistoryInstructions || p.post_history_instructions || ''), enabled: false })
+            imported++
+          }
+          if (state.presets.length > 10) state.presets.splice(0, state.presets.length - 10)
+          await saveState()
+          return { ok: true, imported, message: '已导入 ' + imported + ' 个预设(默认未启用)。' }
+        } catch (e) {
+          return { ok: false, message: '预设解析失败：' + String((e && e.message) || e) }
+        }
+      },
+      presetRemove: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const before = (state.presets || []).length
+        state.presets = (state.presets || []).filter((p) => p.id !== id)
+        await saveState()
+        return { ok: true, removed: before - state.presets.length }
+      },
+      presetSetEnabled: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const on = !!args.enabled
+        const p = (state.presets || []).find((x) => x.id === id)
+        if (!p) return { ok: false, message: '预设不存在。' }
+        p.enabled = on
+        await saveState()
+        return { ok: true, enabled: on, name: p.name, message: on ? '已启用外部预设「' + p.name + '」(会影响系统提示, 风险自负)"' : '已停用「' + p.name + '」。' }
+      },
+      // 世界书(ST 兼容): list/import(ST 世界 JSON)/remove; constant 常驻标记同引擎
+      loreList: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        return (memory.worldbook || []).map((e) => ({ id: e.id, keywords: Array.isArray(e.keywords) ? e.keywords : [], constant: !!e.constant, priority: e.priority || 0, enabled: e.enabled !== false, content: String(e.content || '').slice(0, 140) }))
+      },
+      loreImport: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        try {
+          const j = JSON.parse(String((args && args.json) || ''))
+          const list = Array.isArray(j) ? j : (Array.isArray(j.entries) ? j.entries : (Array.isArray(j.data) ? j.data : []))
+          if (!list.length) return { ok: false, message: '世界书文件里没有条目。' }
+          memory.worldbook = memory.worldbook || []
+          let imported = 0
+          for (const e of list) {
+            if (!e || typeof e !== 'object') continue
+            const ks = [e.key, e.keys, e.keysecondary].filter(Boolean)
+            const keys = []
+            for (const k of ks) {
+              if (Array.isArray(k)) { for (const kk of k) { const s = String(kk).trim(); if (s) keys.push(s) } }
+              else { const s = String(k).trim(); if (s) keys.push(s) }
+            }
+            const content = String(e.content || '')
+            if (!content) continue
+            memory.worldbook.push({ id: 'w' + Date.now() + Math.random().toString(36).slice(2, 5), keywords: keys, content, priority: Number(e.priority) || 0, enabled: !(e.disable || e.enabled === false), constant: !!e.constant })
+            imported++
+          }
+          if (memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
+          await saveState()
+          const consts = memory.worldbook.filter((x) => x.constant).length
+          return { ok: true, imported, message: '已导入 ' + imported + ' 条世界书' + (consts ? '(含常驻 ' + consts + ' 条)' : '') + '。' }
+        } catch (e) {
+          return { ok: false, message: '世界书解析失败：' + String((e && e.message) || e) }
+        }
+      },
+      loreRemove: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const before = (memory.worldbook || []).length
+        memory.worldbook = (memory.worldbook || []).filter((e) => e.id !== id)
+        await saveState()
+        return { ok: true, removed: before - memory.worldbook.length }
+      },
+      // 她眼里的你(祛魅): AI 维护画像, 侧栏可见
+      portraitList: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        if (!Array.isArray(memory.user_portrait)) memory.user_portrait = { notes: [] }
+        return (memory.user_portrait.notes || []).slice(-8)
       },
       stop: async (args) => {
         adoptAgent(args)

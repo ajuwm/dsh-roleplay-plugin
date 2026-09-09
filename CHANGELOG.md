@@ -2,6 +2,14 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.19] - ST 全生态适配 + 祛魅系统(让 AI 对用户去滤镜, 清醒地爱)
+- **ST 角色卡 PNG**: 新增零依赖 `lib/png-card.mjs`(chara_card_v2 读写: tEXt/iTXt `chara` 块 + CRC32 + 占位图); 导入(`roleplay_import_char` 支持 png base64 → 解析即开演)/导出(卡库条目 → PNG, 无原图用占位图, 含 UTF-8 中文正确编解码)
+- **ST 预设(外部预设)**: `presetImport/List/Remove/SetEnabled`——导入默认**关闭**(风险自负, 启用才作为系统提示注入, 提示词标注来源); 注入段 `roleplay.external-preset`
+- **世界书 constant**: `roleplay_lore` 新增 `constant=true` 常驻条目(始终注入, 不依赖关键词命中; 预算内最多 2 条); `loreList/loreImport/loreRemove` 服务(UI 用; ST 世界 JSON 兼容 keys/keysecondary/disable)
+- **祛魅系统(她眼里的你)**: 新工具 `roleplay_user_portrait`(good=优点/bad=缺点/truth=真相, ≤8 条去重, 必须有真实依据)+ 注入段【她把你看得很清楚】; 恭维衰减: 遇到口惠而无实的奉承 → 好感增量 ×0.2(关键词门控, 真诚行动不受影响)
+- **侧栏 UI**: 「她眼里的你」折叠卡(好/缺点/真相三色)+「资 源 库」折叠区四标签(人物卡 PNG 导入/导出+预览、世界书列表/ST 导入/删除、预设导入/启停/删除+风险提示、剧本开头/结尾)+ 桥接新增 9 个端点
+- 新增 T43(PNG 往返/导入、恭维×0.2、画像、预设默认关+注入/停用、lore constant+list/import/remove)——全量 **310/310**
+
 ## [1.5.18] - 记忆系统升级(参照 N.E.K.O. 五层, 按用户确认方案: 主动想/严格防复读/简单去重)
 - **事实化+去重**: 长期记忆条目升级 `{event, subject, importance, emotion, first, last, count, pinned}`; 同一事件合并 count+1(不再重复存), 主题归档(subject 取 topic|kind)
 - **长驻升格**: 高重要事件被提及 ≥3 次 → `pinned`(永不挤出 30 条上限; 挤出时优先淘汰非长驻/最不重要/最旧)
