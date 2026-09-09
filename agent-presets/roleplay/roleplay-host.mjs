@@ -569,13 +569,32 @@ export function apply(ctx, config) {
       return hits.slice(0, limit || 4)
     }
 
+    // 长期记忆排序: 长驻/重要优先, 其次按次数, 最后按时间(注入与侧栏视图共用)
+    function sortFacts(arr) {
+      return (arr || []).slice().sort((a, b) => {
+        const pa = a.pinned ? 2 : (a.importance === 'high' ? 1 : 0)
+        const pb = b.pinned ? 2 : (b.importance === 'high' ? 1 : 0)
+        return (pb - pa) || ((b.count || 1) - (a.count || 1)) || String(b.last).localeCompare(String(a.last))
+      })
+    }
+
     function memorySummary(cfg) {
       const lines = []
-      for (const m of memory.long_term.slice(0, cfg.memLong)) lines.push('- [长期] ' + m.event + (m.count > 1 ? '（' + m.count + '次）' : ''))
+      // 长期记忆: 长驻/重要优先, 其次按次数; 次数≥3 标注「稳定不变, 不要重复提及」(严格防复读)
+      const ordered = sortFacts(memory.long_term)
+      for (const m of ordered.slice(0, cfg.memLong)) {
+        const stable = (m.count || 1) >= 3
+        lines.push('- [长期] ' + m.event + (m.count > 1 ? '（已发生' + m.count + '次）' : '') + (stable ? '【稳定: 别再重复提及, 只有新变化才更新】' : ''))
+      }
       for (const m of memory.short_term.slice(0, cfg.memShort)) lines.push('- [最近] ' + m.event)
       if (memory.user_preferences.likes.length) lines.push('偏好喜欢：' + memory.user_preferences.likes.slice(0, 5).join('、'))
       if (memory.user_preferences.dislikes.length) lines.push('偏好不喜欢：' + memory.user_preferences.dislikes.slice(0, 5).join('、'))
       if (memory.discussed_topics.length) lines.push('已谈话题：' + memory.discussed_topics.slice(-8).join('、'))
+      const refs = (memory.reflections || []).slice(-3)
+      if (refs.length) {
+        lines.push('【她对你们关系的认知】(每次聊天都要用这些结论, 不要重新猜测; 它们是她反复想通的事):')
+        for (const r of refs) lines.push('- ' + r.text)
+      }
       return lines
     }
 
@@ -748,7 +767,7 @@ export function apply(ctx, config) {
         short_term: [], long_term: [],
         user_preferences: { likes: [], dislikes: [], notes: [] },
         discussed_topics: [], events_count: {}, worldbook: worldbook || [],
-        unspoken: [],
+        unspoken: [], reflections: [],
       }
     }
     async function persistMemory(key) {
@@ -760,6 +779,7 @@ export function apply(ctx, config) {
           discussed_topics: memory.discussed_topics, events_count: memory.events_count,
           worldbook: memory.worldbook || [],
           unspoken: memory.unspoken || [],
+          reflections: memory.reflections || [],
         }
         await backupBeforeWrite(REL_ROOT + '/mem-' + key + '.json')
         await fs.writeText(t, JSON.stringify(perChar, null, 2), undefined, undefined, policyFor())
@@ -773,12 +793,26 @@ export function apply(ctx, config) {
         const info = await fs.stat(t)
         if (info !== undefined) {
           const p = JSON.parse(await fs.readText(t))
-          return {
+          const out = {
             ...base, ...p,
             user_preferences: { likes: [], dislikes: [], notes: [], ...(p.user_preferences || {}) },
             worldbook: Array.isArray(p.worldbook) ? p.worldbook : [],
             unspoken: Array.isArray(p.unspoken) ? p.unspoken : [],
+            reflections: Array.isArray(p.reflections) ? p.reflections : [],
           }
+          // 旧结构迁移: long_term 条目补 subject/pinned 默认值(新记忆层兼容)
+          out.long_term = (Array.isArray(out.long_term) ? out.long_term : []).map((m) => ({
+            event: String((m && m.event) || ''),
+            subject: (m && m.subject) || '',
+            importance: (m && m.importance) || 'mid',
+            emotion: (m && m.emotion) || '',
+            first: (m && m.first) || '',
+            last: (m && m.last) || '',
+            count: Number((m && m.count) || 1),
+            pinned: !!(m && m.pinned),
+          })).filter((m) => m.event)
+          if (out.long_term.length > 30) out.long_term.length = 30
+          return out
         }
       } catch (e) { /* fresh memory */ }
       return base
@@ -1041,7 +1075,7 @@ export function apply(ctx, config) {
             const info = await fs.stat(target)
             if (info !== undefined) {
               const cur = await fs.readText(target)
-              await fs.writeText(targetBak, cur, undefined, undefined, policyFor())
+              await fs.writeText(target + '.bak', cur, undefined, undefined, policyFor())
             }
           } catch (e) { console.error("roleplay: backup failed", e) }
           // 读合并：把其他实例已写入的追加型内容并入本内存态，防全量覆写丢增量
@@ -1631,21 +1665,44 @@ export function apply(ctx, config) {
       const kind = EVENT_KINDS.includes(String(args.kind)) ? String(args.kind) : '日常交流'
       const importance = ['high', 'mid', 'low'].includes(String(args.importance)) ? String(args.importance) : 'mid'
       const emotion = args.emotion ? String(args.emotion) : ''
-      memory.short_term.unshift({ event: ev, time: now, emotion, kind, importance })
+      const subject = args.topic ? String(args.topic).trim() : (EVENT_KINDS.includes(kind) ? kind : '')
+      memory.short_term.unshift({ event: ev, time: now, emotion, kind, importance, subject })
       memory.events_count[kind] = (memory.events_count[kind] || 0) + 1
       if (args.topic) { const t = String(args.topic).trim(); if (t && !memory.discussed_topics.includes(t)) memory.discussed_topics.push(t) }
       if (args.preference === 'like' || args.preference === 'dislike') {
         const key = args.preference === 'like' ? 'likes' : 'dislikes'
         if (!memory.user_preferences[key].includes(ev)) memory.user_preferences[key].push(ev)
       }
+      // 简单去重 + 长驻升格: 同事件合并 count+1; 反复提及(≥3次)的重点事件进"长驻"(不被 30 条上限挤掉)
       if (memory.short_term.length > 5) {
         const old = memory.short_term.splice(5)
         for (const m of old) {
           const found = memory.long_term.find((x) => x.event === m.event)
-          if (found) { found.count = (found.count || 1) + 1; found.last = m.time }
-          else if (m.importance === 'high' || m.importance === 'mid') memory.long_term.unshift({ event: m.event, first: m.time, last: m.time, count: 1, importance: m.importance })
+          if (found) {
+            found.count = (found.count || 1) + 1
+            found.last = m.time
+            if (found.importance === 'high') {
+              found.subject = found.subject || subject
+              if (found.count >= 3) found.pinned = true
+            }
+          } else if (m.importance === 'high' || m.importance === 'mid') {
+            memory.long_term.unshift({
+              event: m.event, subject: m.subject || subject, first: m.time, last: m.time, count: 1,
+              importance: m.importance, emotion: m.emotion || '', pinned: false,
+            })
+          }
         }
-        if (memory.long_term.length > 30) memory.long_term.length = 30
+        if (memory.long_term.length > 30) {
+          const movable = memory.long_term.filter((x) => !x.pinned)
+          if (movable.length) {
+            // 从非长驻中挤最旧/最不重要的
+            movable.sort((a, b) => (a.importance === 'high' ? 0 : 1) - (b.importance === 'high' ? 0 : 1) || (Number(a.count) - Number(b.count)) || String(a.last).localeCompare(String(b.last)))
+            const drop = memory.long_term.indexOf(movable[0])
+            if (drop >= 0) memory.long_term.splice(drop, 1)
+          } else if (memory.long_term.length > 30) {
+            memory.long_term.length = 30
+          }
+        }
       }
       await saveState()
       const cur = state.character && state.character.name
@@ -1653,6 +1710,33 @@ export function apply(ctx, config) {
       const stage = relationStage()
       return { ok: true, stored: true, shortTerm: memory.short_term.length, longTerm: memory.long_term.length, stage: STAGE_LABELS[stage] }
     }
+
+    registerTool('roleplay_reflect', '认真想想(关系认知层): 当你对你们的关系有了新的理解/想通的事(比如「他上次守约后, 我真正相信他了」), 把这条认知记下来。用法: 只在真正想通时调用(关系节点/长剧情收尾/对方说了戳心的话之后), 每次最多 1 条; 认知必须来自你们真实发生过的事(能从记忆里找到依据), 不要凭空猜测; 已有认知会在提示词里列出, 重复/相似的不要再记。', {
+      type: 'object',
+      properties: {
+        insight: { type: 'string', description: '你"想通"的一件事(一句话, 25 字内), 如「他守约后我真正相信他了」' },
+        char: { type: 'string', description: '房间模式必填: 针对哪个角色' },
+      },
+      required: ['insight'],
+    }, async (args) => {
+      await ensureLoaded()
+      const tgtChar = args && args.char ? String(args.char).trim() : ''
+      const doReflect = async () => {
+        const text = String((args && args.insight) || '').trim().slice(0, 60)
+        if (!text) return { ok: false, message: 'insight 不能为空。' }
+        if (!Array.isArray(memory.reflections)) memory.reflections = []
+        if (memory.reflections.some((r) => r.text === text || (r.text && text.includes(r.text)))) {
+          return { ok: false, message: '这条认知已经记过了。' }
+        }
+        memory.reflections.push({ text, time: stamp() })
+        if (memory.reflections.length > 6) memory.reflections.splice(0, memory.reflections.length - 6)
+        await persistMemory(charKey())
+        await saveState()
+        return { ok: true, reflections: memory.reflections.length, message: '你又想通了一件重要的事。' }
+      }
+      if (tgtChar && state.character && state.character.name !== tgtChar) return await withChar(tgtChar, doReflect)
+      return doReflect()
+    })
 
     registerTool('roleplay_remember', '记录本轮值得记住的事：重要事件、关系事件、用户的偏好、新话题。每轮对话结束时，如果本轮的互动值得记住，调用本工具。事件类型可选：' + EVENT_KINDS.join('/') + '（房间模式请用 char 指定针对哪个角色）。', {
       type: 'object',
@@ -1860,7 +1944,7 @@ export function apply(ctx, config) {
 
     registerTool('roleplay_clear_memory', '清空角色的所有记忆：短期记忆、长期记忆、用户偏好、已谈话题、事件计数（关系阶段回到陌生人）。用户要求重置记忆/忘掉过去时调用。', { type: 'object', properties: {} }, async () => {
       await ensureLoaded()
-      memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [] }
+      memory = { short_term: [], long_term: [], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: memory.worldbook || [], unspoken: [], reflections: memory.reflections || [] }
       // 关系/里程碑随记忆一起重置（与工具描述一致）；养成数值（stats/economy）保留
       state.relation = { ...DEFAULT_RELATION }
       state.boyfriend = { ...DEFAULT_BOYFRIEND }
@@ -2778,11 +2862,12 @@ export function apply(ctx, config) {
           stage: stageEvents.slice(0, 12),
           stageLabel: state.enabled && state.character ? STAGE_LABELS[stage] : null,
           memoryView: {
-            long: memory.long_term.slice(0, 5).map((m) => m.event + (m.count > 1 ? '（' + m.count + '次）' : '')),
+            long: sortFacts(memory.long_term).slice(0, 5).map((m) => m.event + (m.count > 1 ? '（' + m.count + '次）' : '') + (m.pinned ? '📌' : '')),
             short: memory.short_term.slice(0, 3).map((m) => m.event),
             likes: memory.user_preferences.likes.slice(0, 5),
             dislikes: memory.user_preferences.dislikes.slice(0, 5),
             topics: memory.discussed_topics.slice(-8),
+            reflections: (memory.reflections || []).slice(-3).map((r) => r.text),
           },
           diaryView,
           lastTurn: lastTurnAudit,

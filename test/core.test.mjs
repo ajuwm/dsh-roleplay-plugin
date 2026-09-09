@@ -1182,5 +1182,46 @@ console.log('\nT41 桥接黑盒');
   rmSync(join(repoRoot, 'node_modules'), { recursive: true, force: true });
 }
 
+// ─── T42 记忆升级: 事实化/去重/长驻/反思层/防复读注入 ───
+console.log('\nT42 记忆升级');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  // 同一事件重复记录 → count 合并(简单去重): 目标事件被挤出到长期共 3 次(垫场触发迁移)
+  await b.call('roleplay_remember', { event: '一起去了水族馆', kind: '一起活动', importance: 'high', topic: '水族馆' });
+  for (let i = 0; i < 13; i++) await b.call('roleplay_remember', { event: '日常垫场' + i, kind: '日常交流' });
+  await b.call('roleplay_remember', { event: '一起去了水族馆', kind: '一起活动', importance: 'high' });
+  for (let i = 0; i < 4; i++) await b.call('roleplay_remember', { event: '垫场B' + i, kind: '日常交流' });
+  await b.call('roleplay_remember', { event: '一起去了水族馆', kind: '一起活动', importance: 'high' });
+  await b.call('roleplay_remember', { event: '垫场C0', kind: '日常交流' });
+  for (let i = 0; i < 4; i++) await b.call('roleplay_remember', { event: '垫场D' + i, kind: '日常交流' });
+  const pf = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'mem-甲.json'), 'utf8'));
+  const stayed = pf.long_term.filter((m) => m.event === '一起去了水族馆');
+  ok(stayed.length === 1 && stayed[0].count === 3, '同事件合并(count=3, 不重复存)');
+  ok(stayed[0].pinned === true, '高重要性×3 → 长驻(pinned)');
+  ok(stayed[0].subject === '水族馆', '主题归档(subject)');
+  // 反思层: AI 主动想通 → 注入提示词 + 上限/去重
+  const r1 = await b.call('roleplay_reflect', { insight: '他守约后我真正相信他了' });
+  ok(r1 && r1.ok === true, 'roleplay_reflect 成功');
+  const r2 = await b.call('roleplay_reflect', { insight: '他守约后我真正相信他了' });
+  ok(r2 && r2.ok === false, '相同认知被拒(去重)');
+  for (let i = 0; i < 8; i++) await b.call('roleplay_reflect', { insight: '认知' + i });
+  const pf2 = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'mem-甲.json'), 'utf8'));
+  ok(Array.isArray(pf2.reflections) && pf2.reflections.length <= 6, '反思上限 6 条');
+  const t = String(await b.promptText());
+  ok(t.includes('【她对你们关系的认知】'), '反思段注入提示词');
+  ok(t.includes('稳定: 别再重复提及'), '防复读标注(×3 稳定事实)');
+  // getState 视图
+  const st = await b.gs();
+  ok(st.memoryView && Array.isArray(st.memoryView.reflections) && st.memoryView.long.some((x) => x.includes('📌')), 'getState 记忆视图含反思/长驻标记');
+  // 旧结构迁移: 无 subject/reflections 的旧 mem 加载不崩
+  const f = join(b.root, b.dataRoot, 'mem-乙.json');
+  writeFileSync(f, JSON.stringify({ short_term: [], long_term: [{ event: '旧事一桩', count: 2, importance: 'mid' }], user_preferences: { likes: [], dislikes: [], notes: [] }, discussed_topics: [], events_count: {}, worldbook: [], unspoken: [] }));
+  await b.call('roleplay_start', { name: '乙', persona: 'p乙' });
+  const stB = await b.gs();
+  ok(stB && stB.memoryView && stB.memoryView.long.length >= 0, '旧结构加载不崩(迁移兼容)');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
