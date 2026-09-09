@@ -2974,7 +2974,10 @@ export function apply(ctx, config) {
         }
       },
       // 轻量信息(对话侧栏目标列表):不触发心跳/衰减等副作用,只读当前状态
-      peek: async () => {
+      // ⚠️ 必须 adoptAgent + ensureLoaded: 引擎按 selfAgent 定位会话/工作区,
+      // 跳过后读到的是初始骨架 state(enabled=false) → 对话侧栏误报「未开演」。
+      peek: async (args) => {
+        adoptAgent(args)
         if (!stateLoaded) { try { await ensureLoaded() } catch (e) {} }
         return {
           name: state.character ? state.character.name : null,

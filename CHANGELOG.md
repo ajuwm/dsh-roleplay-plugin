@@ -2,6 +2,11 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.20] - 对话侧栏切换角色后历史消失 / 重开显示"未开演" 修复
+- **根因1(历史消失/闪烁)**: `useChat` 的 `sinceRef/msgsBox/aliveBox` 用普通对象, 每次 render 重建——轮询 interval 闭包与 send 闭包各持一份旧对象, 交叠 `setMsgs` 互相覆盖; 切换到另一个扮演会话后新历史被旧闭包数组污染/重置, 表现为「历史消失」。改为 `useRef`(跨 render 稳定); 顺带 `bodyEl` 同修。
+- **根因2(重开就"未开演")**: ① 引擎 `peek()` 不调 `adoptAgent` → 未按目标会话定位, 读到初始骨架 state(`enabled: false`)误报"未开演"; 桥接 `chat-targets` 从不传 sessionId, 多会话时尤其明显。已修: `peek(args)` 先 adoptAgent+ensureLoaded, 桥接传 `{ sessionId }`。② 客户端 `loadTargets` 无条件优先"记忆的会话"(哪怕已停演/未开演) → 重开后卡在未开演会话。已修: 优先选**仍开演**的(先记忆的, 再最近活跃已开演的), 全未开演才回落第一项。
+- 新增回归断言: T35 peek 带 sessionId; T41 chat-targets 调 peek 必带 sessionId——全量 **312/312**
+
 ## [1.5.19] - ST 全生态适配 + 祛魅系统(让 AI 对用户去滤镜, 清醒地爱)
 - **ST 角色卡 PNG**: 新增零依赖 `lib/png-card.mjs`(chara_card_v2 读写: tEXt/iTXt `chara` 块 + CRC32 + 占位图); 导入(`roleplay_import_char` 支持 png base64 → 解析即开演)/导出(卡库条目 → PNG, 无原图用占位图, 含 UTF-8 中文正确编解码)
 - **ST 预设(外部预设)**: `presetImport/List/Remove/SetEnabled`——导入默认**关闭**(风险自负, 启用才作为系统提示注入, 提示词标注来源); 注入段 `roleplay.external-preset`

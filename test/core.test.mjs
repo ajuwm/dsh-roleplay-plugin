@@ -867,10 +867,10 @@ console.log('\nT35 对话侧边栏');
   ok(r4.messages.length === 0, 'since=lastSeq 无增量');
   // 引擎集成: 发送 → 会话事件可读(同一会话流)
   const b = await boot();
-  const pk0 = await b.svc.peek();
+  const pk0 = await b.svc.peek({ sessionId: 't-session' });
   ok(pk0 && pk0.enabled === false && pk0.name === null, 'peek: 未开演(enabled=false)');
   await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
-  const pk1 = await b.svc.peek();
+  const pk1 = await b.svc.peek({ sessionId: 't-session' });
   ok(pk1 && pk1.name === '甲' && pk1.enabled === true, 'peek: 开演后返回角色名/开演状态');
   const s1 = await b.svc.chatSend({ sessionId: 't-session', text: '在吗' });
   ok(s1 && s1.ok === true, 'chatSend 成功入会话');
@@ -1118,8 +1118,9 @@ console.log('\nT41 桥接黑盒');
   const oldHome = process.env.DSH_HOME;
   process.env.DSH_HOME = join(root, 'dshhome');
   const routes = [];
+  const peekArgs = [];
   const fakeFace = {
-    peek: async () => ({ name: '甲', enabled: true }),
+    peek: async (args) => { peekArgs.push(args); return { name: '甲', enabled: true }; },
     getState: async () => ({ ok: true, character: { name: '甲' } }),
     chatSend: async (args) => ({ ok: !!(args && args.text), message: args && args.text ? 'ok' : 'empty' }),
     chatPoll: async () => ({ messages: [], lastSeq: 0 }),
@@ -1159,6 +1160,9 @@ console.log('\nT41 桥接黑盒');
   };
   const r1 = await call('/roleplay/settings-read', {});
   ok(r1.status === 200 && r1.out && r1.out.ok === true && r1.out.value.heartbeatMinutes === 30, 'settings-read 正常');
+  const r1b = await call('/roleplay/chat-targets', {});
+  ok(r1b.out && r1b.out.ok === true && r1b.out.value[0].sessionId === 's1' && r1b.out.value[0].enabled === true, 'chat-targets 列出已开演会话');
+  ok(peekArgs.length >= 1 && peekArgs[peekArgs.length - 1].sessionId === 's1', 'chat-targets 调 peek 必带 sessionId(否则引擎读到骨架 state 误报未开演)');
   const r2 = await call('/roleplay/nope', {});
   ok(r2.out && r2.out.ok === false && r2.out.error && r2.out.error.code === 'bad-endpoint', 'unknown endpoint 报错');
   const r3 = await call('/roleplay/chat-send', { target: 's1', text: '你好' });
