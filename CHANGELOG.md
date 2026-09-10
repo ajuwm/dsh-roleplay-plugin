@@ -2,6 +2,22 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.21] - 用真实 ST 素材做端到端验收: 修 8 个真 bug(其中"新装用户拿不到预设"影响最大)
+> 方法: 建隔离测试实例(独立 DSH_HOME + 独立工作区 + 端口 3099, 你本机数据零改动已核对),
+> 下载**官方 SillyTavern 仓库**的真实素材(角色卡 539KB / 世界书 Eldoria / 预设 Default),
+> 再跑 HTTP + 浏览器(真实点击) + 真实对话三层验收。结果: 8 个 bug 当场暴露。
+
+- **① 真实 ST 角色卡根本导不进来(最严重)**: 官方卡 `default_Seraphina.png` 的 `chara` 值是 **base64**, 而解析器只做 UTF-8/latin1 回退 → 官方卡全部解析失败。另: zTXt/iTXt 三种块布局被当成一种解析(压缩块必失败)。→ 按块类型分别解析 + 支持 base64。
+- **② 真实世界书导入必失败**: ST 世界书的 `entries` 是**对象**(键 `"0","1",…`), 旧逻辑只认数组 → 一律报"世界书文件里没有条目"。→ 归一化(数组/对象/包装键), 并把 ST 的 `order` 映射为优先级。
+- **③ ST 预设导入成空壳**: ST 预设没有 `prompt`/`system_prompt`, 提示词在 `prompts[]` 里 → 旧逻辑取到空字符串, 启用也无效果。→ 提取 `prompts[]`(跳过 `marker` 占位符, `jailbreak` 归入"回合后要求"), 无 name 时用文件名。
+- **④ 卡内嵌世界观被丢弃**: V2 卡的 `data.character_book`(实测 4 条)导入时完全没读。→ 与手动导入同一条路径吃进世界书(字段名 `keys`/`secondary_keys`/`insertion_order`/`enabled` 也一并兼容)。
+- **⑤ ST 宏没展开**: 真实卡/世界书通篇是 `{{char}}`/`{{user}}`, 原样注入会让模型看到字面宏。→ 在**所有注入点**统一展开(人设/开场白/场景/对话样例/世界书/外部预设/房间多角色)。
+- **⑥ 切卡往返丢 `examples`**: 各处手抄字段的映射漏了 `mes_example`, 切走再切回就没了。→ 引入唯一的 `characterFromCard`/`cardFromCharacter` 映射, 并支持 `alternate_greetings`(备选开场白, 开演时可选一句)。
+- **⑦ 全新 DSH_HOME 永远拿不到预设(影响所有新装用户)**: 物化器开头 `if (!existsSync(dstRoot)) return` —— `.agent-presets` 尚不存在时直接跳过, 新用户装完看不到任何扮演预设(实测干净 home 下预设目录始终为空)。→ 自己 `mkdirSync` 再物化。
+- **⑧ 对话侧栏泄漏内部脚手架**: DSH 把「Current runtime context…」(source.kind=plugin)与 skill 目录「`<system-reminder>…`」(source.kind=skill-catalog)写成 `user/message` 事件, 旧逻辑只认 `rp-*`/plugin/contextual → **898 字的技能清单被当成"用户说的话"整段显示**。→ 新增 `hidden` 分类(本插件注入仍保留并置灰), 前端过滤。
+- 回归: 新增 T44(真实素材形态: base64/zTXt/iTXt 卡、entries 对象、character_book、prompts[] 预设、宏展开、切卡不丢字段、脚手架分类)——全量 **343/343**。
+- 真机验收: 隔离实例上 28/28 端到端断言通过(含 PNG 导出→再导入闭环); 浏览器实测资源库四标签/她眼里的你/对话侧栏切换与重开全部正常; 真实对话确认 AI 正常调用 `roleplay_recall/update/remember/relation`, 且**纯恭维那轮关系零变化**(祛魅生效)、实干那轮 +3。
+
 ## [1.5.20] - 对话侧栏切换角色后历史消失 / 重开显示"未开演" 修复
 - **根因1(历史消失/闪烁)**: `useChat` 的 `sinceRef/msgsBox/aliveBox` 用普通对象, 每次 render 重建——轮询 interval 闭包与 send 闭包各持一份旧对象, 交叠 `setMsgs` 互相覆盖; 切换到另一个扮演会话后新历史被旧闭包数组污染/重置, 表现为「历史消失」。改为 `useRef`(跨 render 稳定); 顺带 `bodyEl` 同修。
 - **根因2(重开就"未开演")**: ① 引擎 `peek()` 不调 `adoptAgent` → 未按目标会话定位, 读到初始骨架 state(`enabled: false`)误报"未开演"; 桥接 `chat-targets` 从不传 sessionId, 多会话时尤其明显。已修: `peek(args)` 先 adoptAgent+ensureLoaded, 桥接传 `{ sessionId }`。② 客户端 `loadTargets` 无条件优先"记忆的会话"(哪怕已停演/未开演) → 重开后卡在未开演会话。已修: 优先选**仍开演**的(先记忆的, 再最近活跃已开演的), 全未开演才回落第一项。

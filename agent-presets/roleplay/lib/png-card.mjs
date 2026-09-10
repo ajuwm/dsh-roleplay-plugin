@@ -43,39 +43,62 @@ function scanChunks(b) {
   return chunks
 }
 
-// tEXt: keyword\0text    iTXt: keyword\0compFlag\0compMethod\0lang\0transKeyword\0text(UTF-8)
-function extractTextValue(data, keyword) {
+// 按块类型取出 keyword 对应的文本字节(三种块的布局各不相同, 必须分开解析):
+//   tEXt: keyword \0 text(latin1)
+//   zTXt: keyword \0 compMethod(1B) \0 compressedText(zlib)
+//   iTXt: keyword \0 compFlag(1B) compMethod(1B) langTag \0 transKeyword \0 text(UTF-8, 可能 zlib 压缩)
+function chunkTextPayload(type, data, keyword) {
   const nul = data.indexOf(0)
   if (nul < 0) return null
-  const key = data.toString('latin1', 0, nul)
-  if (key !== keyword) return null
+  if (data.toString('latin1', 0, nul) !== keyword) return null
   const rest = data.subarray(nul + 1)
-  // 无法区分 tEXt/iTXt 时: 若有多个连续 \0 且第二个字段可解析为数字 → iTXt 结构
-  const parts = []
-  let p = 0
-  for (let i = 0; i < 4 && p < rest.length; i++) {
-    const nx = rest.indexOf(0, p)
-    if (nx < 0) { parts.push(rest.subarray(p)); p = rest.length; break }
-    parts.push(rest.subarray(p, nx))
-    p = nx + 1
+  if (type === 'tEXt') return rest
+  if (type === 'zTXt') {
+    if (rest.length < 2) return null
+    if (rest[0] !== 0) return null                       // 只支持 compMethod=0(deflate)
+    try { return zlib.inflateSync(rest.subarray(1)) } catch (e) { return null }
   }
-  // tEXt 部分: ST 卡的 chara JSON 常为 UTF-8(中文) → 先按 UTF-8 解析(能过 JSON 就用), 回退 latin1
-  if (parts.length >= 5) {
-    const compFlag = parts[0].toString('latin1')
-    let textBuf = parts[4]
-    if (parts.length > 5) textBuf = rest.subarray(rest.length - (parts[4].length + parts[5].length))
+  if (type === 'iTXt') {
+    if (rest.length < 3) return null
+    const compressed = rest[0] === 0x31                    // '1'
+    const l1 = rest.indexOf(0, 2)                          // langTag 结束
+    if (l1 < 0) return null
+    const l2 = rest.indexOf(0, l1 + 1)                     // transKeyword 结束
+    if (l2 < 0) return null
+    const text = rest.subarray(l2 + 1)
+    if (compressed) { try { return zlib.inflateSync(text) } catch (e) { return null } }
+    return text
+  }
+  return null
+}
+
+// chara 值的三种真实形态(实测):
+//   ① 明文 JSON 字节(V2/V3 卡, UTF-8)
+//   ② base64 编码的 JSON 字节(官方 V1 卡 default_Seraphina.png 就是这种)
+//   ③ latin1 里存放的 UTF-8 JSON(旧导出器)
+function decodeCharaJson(payload) {
+  if (!payload || !payload.length) return null
+  const candidates = []
+  try { candidates.push(payload.toString('utf8')) } catch (e) {}
+  try { candidates.push(payload.toString('latin1')) } catch (e) {}
+  for (const s of candidates) {
+    const t = String(s || '').trim()
+    if (!t || (t[0] !== '{' && t[0] !== '[')) continue
     try {
-      if (compFlag === '1') return zlib.inflateSync(textBuf).toString('utf8')
-      return textBuf.toString('utf8')
-    } catch (e) { return null }
+      const j = JSON.parse(t)
+      if (j && typeof j === 'object') return { json: j, text: t }
+    } catch (e) { /* 换下一种 */ }
   }
-  try {
-    const u = parts[0].toString('utf8')
-    JSON.parse(u)
-    return u
-  } catch (e) {
-    try { return parts[0].toString('latin1') } catch (e2) { return null }
+  // base64 形态: 去掉空白后只用 base64 字符集, 解码出来还必须能过 JSON
+  const compact = String(candidates[1] || candidates[0] || '').replace(/\s+/g, '')
+  if (compact.length > 8 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact)) {
+    try {
+      const dec = Buffer.from(compact, 'base64').toString('utf8')
+      const j = JSON.parse(dec)
+      if (j && typeof j === 'object') return { json: j, text: dec }
+    } catch (e) { /* 不是 base64 卡 */ }
   }
+  return null
 }
 
 export function readCardFromPng(bytes) {
@@ -83,15 +106,10 @@ export function readCardFromPng(bytes) {
   if (!isPng(b)) throw new Error('不是有效的 PNG 文件。')
   const chunks = scanChunks(b)
   for (const c of chunks) {
-    if (c.type === 'tEXt' || c.type === 'iTXt' || c.type === 'zTXt') {
-      const val = extractTextValue(c.data, 'chara')
-      if (val) {
-        try {
-          const j = JSON.parse(val)
-          if (j && typeof j === 'object') return { json: j, text: val }
-        } catch (e) { /* 继续找 */ }
-      }
-    }
+    if (c.type !== 'tEXt' && c.type !== 'iTXt' && c.type !== 'zTXt') continue
+    const payload = chunkTextPayload(c.type, c.data, 'chara')
+    const got = decodeCharaJson(payload)
+    if (got) return got
   }
   throw new Error('PNG 中没有找到 SillyTavern 角色卡数据(chara 字段)。')
 }

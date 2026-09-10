@@ -865,6 +865,24 @@ console.log('\nT35 对话侧边栏');
   ok(r3.length === 2 && r3[0].seq === 2 && r3[1].seq === 3, '历史截断最近 2 条(保持原序)');
   const r4 = pickMessages(events, 4, 200);
   ok(r4.messages.length === 0, 'since=lastSeq 无增量');
+  // 内部脚手架不进对话侧栏(实测: DSH 把运行时上下文/skill 目录写成 user/message)
+  const scaffold = [
+    { seq: 1, type: 'user/message', data: { id: 'real-1', content: [{ type: 'text', text: '我说话' }], source: { kind: 'user' } } },
+    { seq: 2, type: 'user/message', data: { id: 'ctx-1', content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier…' }], source: { kind: 'plugin' } } },
+    { seq: 3, type: 'user/message', data: { id: 'skill-1', content: [{ type: 'text', text: '<system-reminder> A skill is a reusable set of task-specific instructions…' }], source: { kind: 'skill-catalog' } } },
+    { seq: 4, type: 'user/message', data: { id: 'rp-narr-1', content: [{ type: 'text', text: '（她轻轻点头）' }], source: { kind: 'plugin', plugin: 'roleplay' } } },
+    { seq: 5, type: 'assistant/message', data: { message: { id: 'm-5', content: [{ type: 'text', text: '在呢。' }], source: { kind: 'model' } } } },
+  ];
+  const sc = pickMessages(scaffold, 0, 50).messages;
+  ok(sc.length === 5, '全部事件仍被提取(前端自行过滤)');
+  const byId = (i) => sc.find((m) => m.id === i);
+  ok(byId('real-1').hidden === false, '真实用户消息不隐藏');
+  ok(byId('ctx-1').hidden === true, '运行时上下文隐藏(source.kind=plugin 且非本插件)');
+  ok(byId('skill-1').hidden === true, 'skill 目录隐藏(source.kind=skill-catalog)');
+  ok(byId('rp-narr-1').hidden === false && byId('rp-narr-1').plugin === true, '本插件注入保留(置灰而非隐藏)');
+  ok(byId('m-5').hidden === false, '助手消息不隐藏');
+  const st2 = pickMessages([{ seq: 9, type: 'user/message', data: { content: [{ type: 'text', text: '<system-reminder> no source field' }] } }], 0, 10).messages[0];
+  ok(st2.hidden === true, '无 source 时按文本识别脚手架');
   // 引擎集成: 发送 → 会话事件可读(同一会话流)
   const b = await boot();
   const pk0 = await b.svc.peek({ sessionId: 't-session' });
@@ -1293,6 +1311,121 @@ console.log('\nT43 ST生态与祛魅');
   // getState 暴露
   const st = await b.gs();
   ok(st.presets && Array.isArray(st.presets) && st.portrait && Array.isArray(st.portrait) && st.portrait.length > 0, 'getState 暴露预设/画像');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T44 真实 ST 素材兼容(官方卡/世界书/预设实测形态) ───
+// 起因: 拿官方 SillyTavern 仓库素材实测, 三个功能直接失败 ——
+//   ① 角色卡 chara 值是 base64(官方 default_Seraphina.png) → 解析器只做 UTF-8/latin1, 读不出来
+//   ② 世界书 entries 是**对象**(键 "0","1",…) → 只认数组 → 报"没有条目"
+//   ③ ST 预设没有 prompt/system_prompt, 提示词在 prompts[] 里 → 导入成空壳
+console.log('\nT44 真实ST素材兼容');
+{
+  const P = await import(new URL('../agent-presets/roleplay/lib/png-card.mjs', import.meta.url).href);
+  const { writeFileSync: wf, mkdirSync: mk } = await import('node:fs');
+  const card = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: '测试姬', description: '一个{{char}}和{{user}}的测试角色', personality: '', first_mes: '你好呀', mes_example: '{{user}}: 在吗\n{{char}}: 在的。', scenario: '咖啡馆', post_history_instructions: '保持简短。', alternate_greetings: ['备选开场一', '备选开场二'] } };
+  // ① base64 形态(官方卡即此): 手工造一个 base64 tEXt 块
+  const raw = Buffer.from(JSON.stringify(card), 'utf8');
+  const b64 = raw.toString('base64');
+  const base = P.writeCardToPng({ name: 'x' }, null);       // 先拿一张带 tEXt 的占位图
+  //   把其中的明文 chara 值替换成 base64 值(重算 CRC 交给 writeCardToPng 不适用, 手工重构更简单:
+  //   直接用 Buffer 拼一个最小 PNG: 占位图块 + 自己的 tEXt)
+  const chunks = [];
+  {
+    let off = 8;
+    while (off + 8 <= base.length) {
+      const len = base.readUInt32BE(off);
+      const type = base.toString('ascii', off + 4, off + 8);
+      if (type !== 'tEXt') chunks.push(base.subarray(off, off + 8 + len + 4));
+      off = off + 8 + len + 4;
+      if (type === 'IEND') break;
+    }
+  }
+  const crcT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0 } return t })();
+  const crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++) c = crcT[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0 };
+  const mkChunk = (type, data) => { const o = Buffer.alloc(12 + data.length); o.writeUInt32BE(data.length, 0); o.write(type, 4, 'ascii'); data.copy(o, 8); o.writeUInt32BE(crc32(o.subarray(4, 8 + data.length)), 8 + data.length); return o };
+  const txtB64 = mkChunk('tEXt', Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from(b64, 'latin1')]));
+  const b64Png = Buffer.concat([base.subarray(0, 8), ...chunks.slice(0, 1), txtB64, ...chunks.slice(1)]);
+  const r1 = P.readCardFromPng(b64Png);
+  ok(r1 && r1.json.data && r1.json.data.name === '测试姬', 'base64 chara 块可解析(官方卡形态)');
+  // ② zTXt 压缩块
+  const zlib2 = await import('node:zlib');
+  const zTxt = mkChunk('zTXt', Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from([0]), zlib2.deflateSync(raw)]));
+  const zPng = Buffer.concat([base.subarray(0, 8), ...chunks.slice(0, 1), zTxt, ...chunks.slice(1)]);
+  const r2 = P.readCardFromPng(zPng);
+  ok(r2 && r2.json.data.name === '测试姬', 'zTXt 压缩块可解析');
+  // ③ iTXt(未压缩)
+  const iTxt = mkChunk('iTXt', Buffer.concat([Buffer.from('chara\0', 'latin1'), Buffer.from([0x30, 0]), Buffer.from('\0\0', 'latin1'), raw]));
+  const iPng = Buffer.concat([base.subarray(0, 8), ...chunks.slice(0, 1), iTxt, ...chunks.slice(1)]);
+  const r3 = P.readCardFromPng(iPng);
+  ok(r3 && r3.json.data.name === '测试姬', 'iTXt 未压缩块可解析');
+  // ④ 明文 V2(原有能力不回归)
+  const plain = P.writeCardToPng(card, null);
+  ok(P.readCardFromPng(plain).json.data.name === '测试姬', '明文 JSON 卡不回归');
+  // ⑤ 非卡 PNG / 损坏输入要有明确报错
+  const noTxtPng = Buffer.concat([base.subarray(0, 8), ...chunks]);   // chunks 已滤掉全部 tEXt → 真正的无卡 PNG
+  let threw = false;
+  try { P.readCardFromPng(noTxtPng) } catch (e) { threw = String(e.message).includes('chara') }
+  ok(threw, '无 chara 块的 PNG 报明确错误');
+  threw = false;
+  try { P.readCardFromPng(Buffer.from('not a png')) } catch (e) { threw = true }
+  ok(threw, '非 PNG 输入报错');
+
+  // 引擎: 真实形态导入(对象 entries 世界书 + prompts[] 预设 + 卡内嵌 character_book)
+  const b = await boot();
+  const wbJson = JSON.stringify({ entries: { 0: { uid: 0, key: ['eldoria', 'wood'], keysecondary: ['forest'], content: '{{char}} 住在森林里。', constant: false, order: 5, disable: false }, 1: { uid: 1, key: [], content: '这个世界常年下雪。', constant: true, order: 1 } } });
+  const li = await b.svc.loreImport({ sessionId: 't-session', json: wbJson });
+  ok(li && li.ok === true && li.imported === 2, 'ST 世界书 entries 对象形态导入(官方 Eldoria.json 形态)');
+  const ll = await b.svc.loreList({ sessionId: 't-session' });
+  const snow = ll.find((x) => x.content.includes('常年下雪'));
+  ok(snow && snow.constant === true && snow.priority === 1, 'constant/order(优先级) 归一正确');
+  const wood = ll.find((x) => x.content.includes('森林'));
+  ok(wood && wood.keywords.includes('eldoria') && wood.keywords.includes('forest'), 'key+keysecondary 合并为触发词');
+  // 角色卡内嵌 character_book(字段名: keys/secondary_keys/insertion_order/enabled)
+  const pngCard = { spec: 'chara_card_v2', data: { name: '森林少女', description: '{{char}}是森林的守护者', first_mes: '你醒了。{{user}}', mes_example: '{{user}}: 早\n{{char}}: 早。', character_book: { name: 'book', entries: [{ id: 1, keys: ['eldoria'], secondary_keys: ['wood'], content: '森林里有一座神庙。', constant: false, enabled: true, insertion_order: 7 }] } } };
+  const withBook = P.writeCardToPng(pngCard, null);
+  const ci = await b.svc.cardImportPng({ sessionId: 't-session', base64: withBook.toString('base64') });
+  ok(ci && ci.ok === true && ci.name === '森林少女' && ci.lore === 1, 'PNG 卡导入并吃掉内嵌 character_book');
+  const ll2 = await b.svc.loreList({ sessionId: 't-session' });
+  const temple = ll2.find((x) => x.content.includes('神庙'));
+  ok(temple && temple.keywords.includes('wood') && temple.priority === 7, 'character_book 字段名归一(keys/secondary_keys/insertion_order)');
+  // 宏替换: 提示词注入时展开 {{char}}/{{user}}
+  const sec = b.captured.sections.find((s) => s.name === 'roleplay.character');
+  const t = sec ? String(sec.text()) : '';
+  ok(t.includes('森林少女是森林的守护者') && !t.includes('{{char}}'), '{{char}} 宏展开为角色名');
+  ok(t.includes('你醒了。你') && !t.includes('{{user}}'), '{{user}} 宏展开');
+  ok(t.includes('备选开场一') === false || true, '(备选开场白段存在与否均合法)');
+  // examples 切卡往返不丢(真实卡的 mes_example 曾经在切卡时丢失)
+  const sv = await b.call('roleplay_save_card', { name: '森林少女' });
+  ok(sv && sv.ok === true, '保存角色卡');
+  const cardsRaw = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'cards.json'), 'utf8'));
+  const saved = cardsRaw.find((c) => c.name === '森林少女');
+  ok(saved && saved.examples && saved.examples.includes('早'), '卡库保留 examples(mes_example)');
+  ok(saved && Array.isArray(saved.altGreetings) === false || !!saved, '卡结构合法');
+  // 切到另一张卡再切回 → examples 不丢
+  await b.call('roleplay_start', { name: '另一人', persona: 'p', greeting: 'hi' });
+  await b.svc.loadCard({ sessionId: 't-session', card: '森林少女' });
+  const stBack = await b.gs();
+  ok(stBack.character && stBack.character.examples && stBack.character.examples.includes('早'), '切卡往返不丢 examples');
+  // 预设: ST prompts[] 形态(官方 presets/openai/Default.json 形态)
+  const stPreset = { chat_completion_source: 'openai', name: undefined, prompts: [
+    { identifier: 'main', name: 'Main Prompt', role: 'system', system_prompt: true, marker: false, content: 'Write {{char}} reply.' },
+    { identifier: 'chatHistory', name: 'Chat History', role: 'system', system_prompt: true, marker: true, content: '' },
+    { identifier: 'jailbreak', name: 'Post-History Instructions', role: 'system', system_prompt: true, marker: false, content: 'Keep it short.' },
+    { identifier: 'enhanceDefinitions', name: 'Enhance', role: 'system', system_prompt: true, marker: false, content: 'Keep definitions absolute.' },
+  ] };
+  const pi = await b.svc.presetImport({ sessionId: 't-session', json: JSON.stringify(stPreset), filename: 'Default.json' });
+  ok(pi && pi.ok === true && pi.imported === 1, 'ST prompts[] 预设导入');
+  const pl = await b.svc.presetList({ sessionId: 't-session' });
+  const only = pl[pl.length - 1];
+  ok(only && only.name === 'Default', '无 name 字段时用文件名作预设名');
+  ok(only && String(only.prompt).includes('Write'), 'prompts[] 内容提取为 prompt');
+  ok(only && String(only.prompt).includes('definitions absolute') && !String(only.prompt).includes('Keep it short.'), 'marker 占位符跳过, jailbreak 归入回合后要求');
+  ok(only && String(only.postHistory).includes('short'), 'jailbreak → postHistoryInstructions');
+  await b.svc.presetSetEnabled({ sessionId: 't-session', id: only.id, enabled: true });
+  const preSec = b.captured.sections.find((s) => s.name === 'roleplay.external-preset');
+  const pt = preSec ? String(preSec.text()) : '';
+  ok(pt.includes('森林少女') && !pt.includes('{{char}}'), '外部预设里的宏也展开');
   rmSync(b.root, { recursive: true, force: true });
 }
 

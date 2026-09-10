@@ -14,11 +14,19 @@ function extractText(ev) {
   if (!text) return null
   const id = m.id || raw.id || null
   const src = m.source || raw.source || null
-  const plugin = !!(
-    (id && typeof id === 'string' && id.startsWith('rp-')) ||
-    (src && (src.kind === 'plugin' || src.kind === 'contextual'))
-  )
-  return { text, id, plugin }
+  const kind = src && typeof src.kind === 'string' ? src.kind : null
+  // 本插件自己的注入: id 以 rp- 开头 或 source.plugin==='roleplay'(用于与 DSH 自身注入区分)
+  const rpTagged = !!((id && typeof id === 'string' && id.startsWith('rp-')) || (src && src.plugin === 'roleplay'))
+  const plugin = rpTagged || kind === 'plugin' || kind === 'contextual'
+  // 内部脚手架不该出现在对话侧栏 —— 实测 DSH 会把
+  //   「Current runtime context…」(source.kind=plugin, 无 plugin 字段)
+  //   skill 目录「<system-reminder>…」(source.kind=skill-catalog)
+  // 写成 user/message 事件; 旧逻辑只认 rp-*/plugin/contextual, 于是 898 字的技能清单
+  // 被当成"用户说的话"整段显示在侧栏里。
+  const scaffoldKind = kind !== null && kind !== 'user' && kind !== 'model' && kind !== 'assistant'
+  const scaffoldText = /^\s*(<system-reminder>|Current runtime context\.)/i.test(text)
+  const hidden = !rpTagged && (scaffoldKind || scaffoldText)
+  return { text, id, plugin, hidden }
 }
 
 export function extractMessage(ev) {

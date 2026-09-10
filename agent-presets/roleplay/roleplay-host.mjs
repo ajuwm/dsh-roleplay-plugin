@@ -12,9 +12,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dimDelta, decayLossOf } from './lib/relation-core.mjs?v=16'
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
-import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=1'
+import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=2'
 import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
-import { readCardFromPng, writeCardToPng } from './lib/png-card.mjs?v=1'
+import { readCardFromPng, writeCardToPng } from './lib/png-card.mjs?v=2'
 import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
@@ -2060,22 +2060,43 @@ export function apply(ctx, config) {
 
     // 切换/新建角色前自动保存当前角色为卡：保证旧人设永远可切回，不再被覆盖丢失。
     // 已存在同名卡则跳过（不重复）；返回已保存的卡。
+    // 角色卡 ⇄ 当前角色 的唯一映射(此前各处手抄字段, 导致 examples/altGreetings 在切卡往返时丢失)
+    function characterFromCard(card) {
+      if (!card || !card.name) return null
+      return {
+        name: card.name,
+        persona: card.persona || '',
+        ...(card.scene ? { scene: card.scene } : {}),
+        ...(card.status && typeof card.status === 'object' ? { status: JSON.parse(JSON.stringify(card.status)) } : {}),
+        ...(card.mode ? { mode: card.mode } : {}),
+        ...(card.greeting ? { greeting: card.greeting } : {}),
+        ...(card.examples ? { examples: card.examples } : {}),
+        ...(Array.isArray(card.altGreetings) && card.altGreetings.length ? { altGreetings: card.altGreetings.slice(0, 3) } : {}),
+      }
+    }
+    function cardFromCharacter(ch, id) {
+      if (!ch || !ch.name) return null
+      return {
+        id: id || ('card-' + charKeyFor(ch.name)),
+        name: ch.name,
+        persona: ch.persona || '',
+        ...(ch.scene ? { scene: ch.scene } : {}),
+        ...(ch.status && typeof ch.status === 'object' ? { status: JSON.parse(JSON.stringify(ch.status)) } : {}),
+        ...(ch.mode ? { mode: ch.mode } : {}),
+        ...(ch.greeting ? { greeting: ch.greeting } : {}),
+        ...(ch.examples ? { examples: ch.examples } : {}),
+        ...(Array.isArray(ch.altGreetings) && ch.altGreetings.length ? { altGreetings: ch.altGreetings.slice(0, 3) } : {}),
+        savedAt: new Date().toISOString(),
+      }
+    }
+
     async function autoSaveCurrentCard() {
       if (!state.character || !state.character.name) return null
       try {
         const cards = await readCards()
         const existing = cards.find((c) => c.name === state.character.name || c.id === 'card-' + charKey())
         if (existing) return existing
-        const card = {
-          id: 'card-' + charKey(),
-          name: state.character.name,
-          persona: state.character.persona || '',
-          ...(state.character.scene ? { scene: state.character.scene } : {}),
-          ...(state.character.status && typeof state.character.status === 'object' ? { status: JSON.parse(JSON.stringify(state.character.status)) } : {}),
-          ...(state.character.mode ? { mode: state.character.mode } : {}),
-          ...(state.character.greeting ? { greeting: state.character.greeting } : {}),
-          savedAt: new Date().toISOString(),
-        }
+        const card = cardFromCharacter(state.character, 'card-' + charKey())
         cards.push(card)
         await writeCards(cards)
         return card
@@ -2093,16 +2114,7 @@ export function apply(ctx, config) {
       const cards = await readCards()
       const cardName = (args.name && String(args.name).trim()) || state.character.name || '未命名'
       const existing = cards.find((c) => c.name === cardName)
-      const card = {
-        id: existing ? existing.id : 'card-' + Date.now().toString(36),
-        name: cardName,
-        persona: state.character.persona || '',
-        ...(state.character.scene ? { scene: state.character.scene } : {}),
-        ...(state.character.status && typeof state.character.status === 'object' ? { status: JSON.parse(JSON.stringify(state.character.status)) } : {}),
-        ...(state.character.mode ? { mode: state.character.mode } : {}),
-        ...(state.character.greeting ? { greeting: state.character.greeting } : {}),
-        savedAt: new Date().toISOString(),
-      }
+      const card = cardFromCharacter({ ...state.character, name: cardName }, existing ? existing.id : 'card-' + Date.now().toString(36))
       if (existing) Object.assign(existing, card)
       else cards.push(card)
       await writeCards(cards)
@@ -2132,14 +2144,7 @@ export function apply(ctx, config) {
       await persistProgress(oldKey)
       await autoSaveCurrentCard()
       state.enabled = true
-      state.character = {
-        name: card.name,
-        persona: card.persona || '',
-        ...(card.scene ? { scene: card.scene } : {}),
-        ...(card.status && typeof card.status === 'object' ? { status: JSON.parse(JSON.stringify(card.status)) } : {}),
-        ...(card.mode ? { mode: card.mode } : {}),
-        ...(card.greeting ? { greeting: card.greeting } : {}),
-      }
+      state.character = characterFromCard(card)
       memory = await loadMemory(charKey())
       await loadProgress(charKey())
       pushStage('env', '角色卡已加载：' + card.name)
@@ -2564,6 +2569,20 @@ export function apply(ctx, config) {
 
     // ==================== 系统提示注入 ====================
 
+    // ST 宏展开: 真实 ST 角色卡 / 世界书 / 预设里大量使用 {{char}} / {{user}} 占位符
+    // (实测官方 Eldoria 世界书通篇如此)。原样注入会让模型看到字面宏 → 在所有注入点统一展开。
+    function expandStMacros(text) {
+      const s = (text === undefined || text === null) ? '' : String(text)
+      if (s.indexOf('{{') < 0) return s
+      const charName = (state.character && state.character.name) ? state.character.name : '她'
+      const up = state.userProfile || {}
+      const userName = String(up.nickname || up.name || '').trim() || '你'
+      return s
+        .replace(/\{\{\s*char\s*\}\}/gi, charName)
+        .replace(/\{\{\s*user\s*\}\}/gi, userName)
+        .replace(/\{\{\s*persona\s*\}\}/gi, userName)
+    }
+
     if (systemPrompt) {
       systemPrompt.section({
         name: 'roleplay.character',
@@ -2599,14 +2618,14 @@ export function apply(ctx, config) {
               for (const n of allNames) {
                 const snap = roomSnapshot[n]
                 rl.push('──── 【角色：' + n + '】 ────')
-                rl.push('人设：' + (snap ? snap.persona : (n === c.name ? c.persona : '（资料加载中）')))
+                rl.push('人设：' + expandStMacros(snap ? snap.persona : (n === c.name ? c.persona : '（资料加载中）')))
                 if (snap && snap.relation) {
                   rl.push('与玩家当前关系：好感 ' + tierLabel('favor', snap.relation.favor) + ' · 信任 ' + tierLabel('trust', snap.relation.trust) + (snap.relation.heart !== undefined && !isFriendStyle() ? ' · 心动 ' + tierLabel('heart', snap.relation.heart) : ''))
                 }
                 if (snap && snap.mems && snap.mems.length) rl.push('她记得的事：' + snap.mems.join('；'))
-                if (n === c.name && c.greeting && !saidGreeting) rl.push('【开场问候语】' + n + '第一次见面，可先用这句开场（只说一次）：' + c.greeting)
+                if (n === c.name && c.greeting && !saidGreeting) rl.push('【开场问候语】' + n + '第一次见面，可先用这句开场（只说一次）：' + expandStMacros(c.greeting))
               }
-              rl.push('当前场景：' + c.scene)
+              rl.push('当前场景：' + expandStMacros(c.scene))
               rl.push('当前时段：' + period.label + ' —— ' + period.desc)
               rl.push(nowCheckLine(now, period))
               rl.push('【房间规则】',
@@ -2627,10 +2646,13 @@ export function apply(ctx, config) {
             const loreHits = matchedLore(cfg.lore)
             const lines = [
               '【角色扮演模式】你现在正在扮演「' + c.name + '」，这是你的核心身份。',
-              '人设：' + c.persona,
+              '人设：' + expandStMacros(c.persona),
             ]
-            if (!saidGreeting && c.greeting) lines.push('【开场问候语】这是你们第一次见面，先用这句开场（只说一次）：' + c.greeting)
-            if (c.scene) lines.push('当前场景：' + c.scene)
+            if (!saidGreeting && c.greeting) lines.push('【开场问候语】这是你们第一次见面，先用这句开场（只说一次）：' + expandStMacros(c.greeting))
+            if (!saidGreeting && Array.isArray(c.altGreetings) && c.altGreetings.length) {
+              lines.push('【其他可用开场白】(上面那句不合适时可换用其中一句, 仍然只念一句):\n' + c.altGreetings.map((g, i) => (i + 1) + '. ' + expandStMacros(g).slice(0, 260)).join('\n'))
+            }
+            if (c.scene) lines.push('当前场景：' + expandStMacros(c.scene))
             const status = c.status || {}
             const keys = Object.keys(status)
             if (keys.length) lines.push('剧本状态：' + keys.map((k) => k + ': ' + status[k]).join('，'))
@@ -2708,10 +2730,10 @@ export function apply(ctx, config) {
             }
             if (loreHits.length) {
               lines.push('背景资料（对话涉及这些时自然融入）：')
-              for (const e of loreHits) lines.push('- ' + e.content)
+              for (const e of loreHits) lines.push('- ' + expandStMacros(e.content))
             }
             if (cfg.physio) lines.push('生理反应参考：' + PHYSIOLOGY)
-            if (cfg.examples && c.examples) lines.push('对话风格参考（不要照抄，体会语气）：\n' + c.examples.slice(0, 1500))
+            if (cfg.examples && c.examples) lines.push('对话风格参考（不要照抄，体会语气）：\n' + expandStMacros(c.examples).slice(0, 1500))
             const narration = state.settings && state.settings.narrationMode
             const sStart = state.settings && state.settings.scriptStart ? String(state.settings.scriptStart) : ''
             const sEnd = state.settings && state.settings.scriptEnd ? String(state.settings.scriptEnd) : ''
@@ -2777,8 +2799,8 @@ export function apply(ctx, config) {
           if (!enabled.length) return ''
           const lines = ['【外部预设(用户导入, 风险自担)】']
           for (const p of enabled) {
-            if (p.prompt) lines.push('〈' + p.name + '〉写作要求: ' + String(p.prompt).slice(0, 600))
-            if (p.postHistoryInstructions) lines.push('〈' + p.name + '〉回合后要求: ' + String(p.postHistoryInstructions).slice(0, 300))
+            if (p.prompt) lines.push('〈' + p.name + '〉写作要求: ' + expandStMacros(String(p.prompt).slice(0, 600)))
+            if (p.postHistoryInstructions) lines.push('〈' + p.name + '〉回合后要求: ' + expandStMacros(String(p.postHistoryInstructions).slice(0, 300)))
           }
           return lines.join('\n')
         },
@@ -2908,6 +2930,40 @@ export function apply(ctx, config) {
     }, 20000)
 
     // ==================== 对外服务（浏览器桥接读取） ====================
+
+    // ST 世界书归一(真实素材里有两套并存命名, 实测):
+    //   世界书文件(Eldoria.json): key / keysecondary / order / disable; entries 是**对象**(键 "0","1",…)
+    //   卡内嵌 character_book:    keys / secondary_keys / insertion_order / enabled:true
+    function normalizeLoreList(x) {
+      if (Array.isArray(x)) return x
+      if (!x || typeof x !== 'object') return []
+      for (const key of ['entries', 'data', 'world_info', 'items']) {
+        const v = x[key]
+        if (Array.isArray(v)) return v
+        if (v && typeof v === 'object') return Object.values(v)
+      }
+      return []
+    }
+    function normalizeStLoreEntry(e) {
+      if (!e || typeof e !== 'object') return null
+      const ks = [e.key, e.keys, e.keysecondary, e.secondary_keys].filter(Boolean)
+      const keys = []
+      for (const k of ks) {
+        if (Array.isArray(k)) { for (const kk of k) { const s = String(kk).trim(); if (s) keys.push(s) } }
+        else { const s = String(k).trim(); if (s) keys.push(s) }
+      }
+      const content = String(e.content || '')
+      if (!content) return null
+      const pr = (e.priority !== undefined) ? e.priority : (e.order !== undefined ? e.order : e.insertion_order)
+      return {
+        keywords: keys,
+        content,
+        priority: Number(pr) || 0,
+        enabled: !(e.disable || e.enabled === false),
+        constant: !!e.constant,
+      }
+    }
+    function makeLoreId() { return 'w' + Date.now() + Math.random().toString(36).slice(2, 5) }
 
     ctx.provide('roleplay', {
       getState: async (args) => {
@@ -3083,6 +3139,8 @@ export function apply(ctx, config) {
         return r ? { ok: true, day: r.day, count: r.count } : { ok: false, message: '备份失败(数据根可能还不存在)。' }
       },
       // ST PNG 卡: 导入(解析→开演, 与 JSON 卡同流程) / 导出(卡库条目→PNG, 无原图用占位图)
+      // 兼容实测形态: ① base64 tEXt 的 V2 卡(官方 default_Seraphina.png) ② 明文 JSON 的 V1/V2 卡
+      //              ③ zTXt/iTXt 压缩块; 另吃掉卡内嵌 character_book(该卡带 4 条世界观)。
       cardImportPng: async (args) => {
         adoptAgent(args)
         await ensureLoaded()
@@ -3091,14 +3149,34 @@ export function apply(ctx, config) {
           const read = readCardFromPng(buf)
           const d = read.json && read.json.data ? read.json.data : read.json
           const name = String(d.name || d.char_name || '').trim() || '未知角色'
+          const personaParts = [d.description, d.personality, d.system_prompt].filter(Boolean).map(String)
+          // V2 卡的 post_history_instructions：作为「回合后要求」并入人设(角色级约束)
+          const phi = String(d.post_history_instructions || '').trim()
+          if (phi) personaParts.push('【回合后要求】' + phi)
+          const alts = Array.isArray(d.alternate_greetings) ? d.alternate_greetings.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3) : []
           state.character = {
             name,
-            persona: [d.description, d.personality, d.system_prompt].filter(Boolean).map(String).join('\n') || '（角色卡未提供人设）',
+            persona: personaParts.join('\n') || '（角色卡未提供人设）',
             scene: d.scenario ? String(d.scenario) : '',
             status: {},
             greeting: d.first_mes ? String(d.first_mes) : '',
             examples: d.mes_example ? String(d.mes_example) : '',
+            ...(alts.length ? { altGreetings: alts } : {}),
             mode: state.character && state.character.mode ? state.character.mode : 'default',
+          }
+          // 卡内嵌世界观 → 直接进世界书(与手动导入同一条路径, 关键词/常驻语义一致)
+          let loreCount = 0
+          const book = d.character_book || (read.json && read.json.character_book) || null
+          if (book) {
+            const entries = normalizeLoreList(book)
+            for (const raw of entries) {
+              const e = normalizeStLoreEntry(raw)
+              if (!e) continue
+              memory.worldbook = memory.worldbook || []
+              memory.worldbook.push({ id: makeLoreId(), ...e })
+              loreCount++
+            }
+            if (memory.worldbook && memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
           }
           state.enabled = true
           state.lastHb = heartbeatKey(new Date())
@@ -3106,7 +3184,7 @@ export function apply(ctx, config) {
           stageStartSeq = session ? session.seq : 0
           saidGreeting = false
           await saveState()
-          return { ok: true, name, message: '已导入 PNG 角色卡「' + name + '」' + (state.character.greeting ? '，开场白：「' + state.character.greeting.slice(0, 60) + '」' : '') + '。' }
+          return { ok: true, name, lore: loreCount, message: '已导入 PNG 角色卡「' + name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (loreCount ? '，并导入内嵌世界观 ' + loreCount + ' 条。' : '。') }
         } catch (e) {
           return { ok: false, message: 'PNG 卡解析失败：' + String((e && e.message) || e) }
         }
@@ -3146,16 +3224,38 @@ export function apply(ctx, config) {
           const j = JSON.parse(raw)
           const presets = Array.isArray(j) ? j : (j.presets ? j.presets : [j])
           if (!presets.length) return { ok: false, message: '预设文件里没有内容。' }
+          const fileName = String((args && args.filename) || '').replace(/\.json$/i, '').trim()
+          // ST 预设(实测 presets/openai/Default.json): 顶层是模型参数, 提示词在 prompts[] 里;
+          // 其中 marker:true 是占位符(空内容), jailbreak 条目 = post-history instructions。
+          const extractStPreset = (p) => {
+            let prompt = String(p.prompt || p.system_prompt || '')
+            let post = String(p.postHistoryInstructions || p.post_history_instructions || '')
+            if (!prompt && Array.isArray(p.prompts)) {
+              const parts = []
+              for (const it of p.prompts) {
+                if (!it || typeof it !== 'object' || it.marker) continue
+                const c = String(it.content || '').trim()
+                if (!c) continue
+                if (String(it.identifier) === 'jailbreak') { if (!post) post = c; continue }
+                parts.push(c)
+              }
+              prompt = parts.join('\n\n')
+            }
+            return { prompt, post }
+          }
           if (!Array.isArray(state.presets)) state.presets = []
           let imported = 0
           for (const p of presets) {
             if (!p || typeof p !== 'object') continue
-            state.presets.push({ id: 'preset-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6), name: String(p.name || '未命名预设').slice(0, 60), raw, prompt: String(p.prompt || p.system_prompt || ''), postHistoryInstructions: String(p.postHistoryInstructions || p.post_history_instructions || ''), enabled: false })
+            const ex = extractStPreset(p)
+            const nm = String(p.name || p.preset_name || fileName || '未命名预设').slice(0, 60)
+            state.presets.push({ id: 'preset-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6), name: nm, raw, prompt: ex.prompt, postHistoryInstructions: ex.post, enabled: false })
             imported++
           }
           if (state.presets.length > 10) state.presets.splice(0, state.presets.length - 10)
           await saveState()
-          return { ok: true, imported, message: '已导入 ' + imported + ' 个预设(默认未启用)。' }
+          const empty = state.presets.filter((p) => !p.prompt && !p.postHistoryInstructions).length
+          return { ok: true, imported, message: '已导入 ' + imported + ' 个预设(默认未启用)' + (empty ? '，其中 ' + empty + ' 个未提取到提示词文本' : '') + '。' }
         } catch (e) {
           return { ok: false, message: '预设解析失败：' + String((e && e.message) || e) }
         }
@@ -3191,21 +3291,14 @@ export function apply(ctx, config) {
         await ensureLoaded()
         try {
           const j = JSON.parse(String((args && args.json) || ''))
-          const list = Array.isArray(j) ? j : (Array.isArray(j.entries) ? j.entries : (Array.isArray(j.data) ? j.data : []))
+          const list = normalizeLoreList(j)
           if (!list.length) return { ok: false, message: '世界书文件里没有条目。' }
           memory.worldbook = memory.worldbook || []
           let imported = 0
-          for (const e of list) {
-            if (!e || typeof e !== 'object') continue
-            const ks = [e.key, e.keys, e.keysecondary].filter(Boolean)
-            const keys = []
-            for (const k of ks) {
-              if (Array.isArray(k)) { for (const kk of k) { const s = String(kk).trim(); if (s) keys.push(s) } }
-              else { const s = String(k).trim(); if (s) keys.push(s) }
-            }
-            const content = String(e.content || '')
-            if (!content) continue
-            memory.worldbook.push({ id: 'w' + Date.now() + Math.random().toString(36).slice(2, 5), keywords: keys, content, priority: Number(e.priority) || 0, enabled: !(e.disable || e.enabled === false), constant: !!e.constant })
+          for (const raw of list) {
+            const e = normalizeStLoreEntry(raw)
+            if (!e) continue
+            memory.worldbook.push({ id: makeLoreId(), ...e })
             imported++
           }
           if (memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
@@ -3323,14 +3416,7 @@ export function apply(ctx, config) {
         await persistProgress(oldKey)
         await autoSaveCurrentCard()
         state.enabled = true
-        state.character = {
-          name: useCard.name,
-          persona: useCard.persona || '',
-          ...(useCard.scene ? { scene: useCard.scene } : {}),
-          ...(useCard.status && typeof useCard.status === 'object' ? { status: JSON.parse(JSON.stringify(useCard.status)) } : {}),
-          ...(useCard.mode ? { mode: useCard.mode } : {}),
-          ...(useCard.greeting ? { greeting: useCard.greeting } : {}),
-        }
+        state.character = characterFromCard(useCard)
         memory = await loadMemory(charKey())
         await loadProgress(charKey())
         pushStage('env', '角色卡已加载：' + useCard.name)
