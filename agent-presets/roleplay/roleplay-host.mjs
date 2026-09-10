@@ -916,21 +916,29 @@ export function apply(ctx, config) {
         return info !== undefined
       } catch (e) { return false }
     }
+    // ⚠️ fs.listDir() 返回的是 FsDirEntry[]({ name, type, target, size }), **不是**字符串数组。
+    // 老备份代码直接拿条目当文件名 → `String(entry)` 得到 "[object Object]",
+    // 于是 L2 全量快照与 L3 启动恢复**一直静默失效**(实测 dailySnapshot 报
+    // `cannot read "...\.roleplay\[object Object]"`), 只有 L2b 单文件同步侥幸能跑。
+    function entryNames(entries) {
+      return (Array.isArray(entries) ? entries : [])
+        .map((e) => (typeof e === 'string' ? e : (e && e.name) ? String(e.name) : ''))
+        .filter(Boolean)
+    }
     // L2: 每日一次把数据根全部文本文件快照到 workspace/.roleplay-backup/<dataRoot>/<date>/
     async function dailySnapshot(force) {
       if (!BACKUP_ROOT || !fs) return null
       const day = dayKey(new Date())
       if (!force && await snapshotExists(day)) return null
       try {
-        const srcDir = await resolveFile(REL_ROOT)
-        const files = await fs.listDir(srcDir)
+        const files = entryNames(await fs.listDir(await resolveFile(REL_ROOT)))
         const copied = []
         for (const f of files) {
-          if (!f || String(f).endsWith('.bak') || f === '.rp-version') continue
-          const content = await fs.readText(path.join(srcDir, f))
+          if (!f || f.endsWith('.bak') || f === '.rp-version') continue
+          const content = await fs.readText(await resolveFile(path.join(REL_ROOT, f)))
           const dst = await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, day, f))
           await fs.writeText(dst, content, undefined, undefined, policyFor())
-          copied.push(String(f))
+          copied.push(f)
         }
         backupLastAt = stamp()
         return { day, count: copied.length }
@@ -957,12 +965,12 @@ export function apply(ctx, config) {
       if (!BACKUP_ROOT || !fs) return 0
       try {
         const snapRoot = await resolveFile(path.join(BACKUP_ROOT, REL_ROOT))
-        const dates = (await fs.listDir(snapRoot)).filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(String(x))).sort()
+        const dates = entryNames(await fs.listDir(snapRoot)).filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(x)).sort()
         if (!dates.length) return 0
         const latest = dates[dates.length - 1]
-        const snapFiles = await fs.listDir(await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, latest)))
+        const snapFiles = entryNames(await fs.listDir(await resolveFile(path.join(BACKUP_ROOT, REL_ROOT, latest))))
         let curFiles = []
-        try { curFiles = await fs.listDir(await resolveFile(REL_ROOT)) } catch (e) { curFiles = [] }
+        try { curFiles = entryNames(await fs.listDir(await resolveFile(REL_ROOT))) } catch (e) { curFiles = [] }
         const miss = missingOf(snapFiles, curFiles)
         let n = 0
         for (const f of miss) {
@@ -1685,25 +1693,11 @@ export function apply(ctx, config) {
         try { data = JSON.parse(String(args.json)) } catch (e) { return { ok: false, message: 'JSON 解析失败：' + String(e && e.message ? e.message : e) } }
       }
       const d = data && data.data ? data.data : data
-      const name = String(d.name || d.char_name || '').trim() || '未知角色'
-      const persona = [d.description, d.personality, d.system_prompt].filter(Boolean).map(String).join('\n')
-      state.character = {
-        name: name,
-        persona: persona || '（角色卡未提供人设）',
-        scene: d.scenario ? String(d.scenario) : '',
-        status: {},
-        greeting: d.first_mes ? String(d.first_mes) : '',
-        examples: d.mes_example ? String(d.mes_example) : '',
-        mode: state.character && state.character.mode ? state.character.mode : 'default',
-      }
-      state.enabled = true
-      state.lastHb = heartbeatKey(new Date())
-      const session = currentSession()
-      stageStartSeq = session ? session.seq : 0
-      saidGreeting = false
+      const r = await importCardData(d)
+      if (!r.ok) return { ok: false, message: '导入失败。' }
       memory.events_count['初次对话'] = (memory.events_count['初次对话'] || 0) + 1
       await saveState()
-      return { ok: true, message: '已导入角色「' + name + '」' + (state.character.greeting ? '，开场白：「' + state.character.greeting.slice(0, 60) + '」' : '') + '。' }
+      return { ok: true, name: r.name, lore: r.lore, savedCard: r.savedCard, message: '已导入角色「' + r.name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，并导入内嵌世界观 ' + r.lore + ' 条' : '') + '，已存入卡库。' }
     })
 
     async function rememberImpl(args) {
@@ -2101,6 +2095,68 @@ export function apply(ctx, config) {
         await writeCards(cards)
         return card
       } catch (e) { console.error('roleplay: auto-save card failed', e); return null }
+    }
+
+    // 导入角色卡(JSON 卡 / PNG 卡同一条路径)。
+    // 修复两个实测缺陷:
+    //   ⑨ 老实现只覆盖 state.character —— 导入的卡**不进卡库**, 切走后卡就找不到了
+    //      ("卡库"里那条只是当前角色的虚拟条目, 一旦切走即消失);
+    //   ⑩ 覆盖前不归档 → 上一个角色的人设被无声丢弃(记忆/进度还在, 人设没了)。
+    // 现在: 先归档旧角色(persist + autoSave)→ 写新角色 → 卡库 upsert → 吃内嵌 character_book → 开演。
+    async function importCardData(d) {
+      const name = String(d.name || d.char_name || '').trim() || '未知角色'
+      try {
+        const oldKey = charKey()
+        await persistMemory(oldKey)
+        await persistProgress(oldKey)
+        await autoSaveCurrentCard()
+      } catch (e) { console.error('roleplay: import archive failed', e) }
+      const personaParts = [d.description, d.personality, d.system_prompt].filter(Boolean).map(String)
+      const phi = String(d.post_history_instructions || '').trim()
+      if (phi) personaParts.push('【回合后要求】' + phi)
+      const alts = Array.isArray(d.alternate_greetings)
+        ? d.alternate_greetings.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3) : []
+      state.character = {
+        name,
+        persona: personaParts.join('\n') || '（角色卡未提供人设）',
+        scene: d.scenario ? String(d.scenario) : '',
+        status: {},
+        greeting: d.first_mes ? String(d.first_mes) : '',
+        examples: d.mes_example ? String(d.mes_example) : '',
+        ...(alts.length ? { altGreetings: alts } : {}),
+        mode: state.character && state.character.mode ? state.character.mode : 'default',
+      }
+      // 卡内嵌世界观 → 世界书(与手动导入同一条路径)
+      let loreCount = 0
+      const book = d.character_book || null
+      if (book) {
+        memory.worldbook = memory.worldbook || []
+        for (const raw of normalizeLoreList(book)) {
+          const e = normalizeStLoreEntry(raw)
+          if (!e) continue
+          memory.worldbook.push({ id: makeLoreId(), ...e })
+          loreCount++
+        }
+        if (memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
+      }
+      // 写入卡库(同名 upsert, 保留原 id)
+      let savedCard = false
+      try {
+        const cards = await readCards()
+        const fresh = cardFromCharacter(state.character, 'card-' + charKeyFor(name))
+        const ex = cards.find((c) => c.name === name)
+        if (ex) Object.assign(ex, fresh, { id: ex.id, savedAt: new Date().toISOString() })
+        else cards.push(fresh)
+        await writeCards(cards)
+        savedCard = true
+      } catch (e) { console.error('roleplay: import save card failed', e) }
+      state.enabled = true
+      state.lastHb = heartbeatKey(new Date())
+      const session = currentSession()
+      stageStartSeq = session ? session.seq : 0
+      saidGreeting = false
+      await saveState()
+      return { ok: true, name, lore: loreCount, savedCard }
     }
 
     registerTool('roleplay_save_card', '把当前扮演的角色保存为一张角色卡（多卡库）。之后用 roleplay_load_card 可随时切回；桌宠互动也会以该角色回应。用户说「保存角色卡/存卡」时调用。', {
@@ -3148,43 +3204,9 @@ export function apply(ctx, config) {
           const buf = Buffer.from(String((args && args.base64) || ''), 'base64')
           const read = readCardFromPng(buf)
           const d = read.json && read.json.data ? read.json.data : read.json
-          const name = String(d.name || d.char_name || '').trim() || '未知角色'
-          const personaParts = [d.description, d.personality, d.system_prompt].filter(Boolean).map(String)
-          // V2 卡的 post_history_instructions：作为「回合后要求」并入人设(角色级约束)
-          const phi = String(d.post_history_instructions || '').trim()
-          if (phi) personaParts.push('【回合后要求】' + phi)
-          const alts = Array.isArray(d.alternate_greetings) ? d.alternate_greetings.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3) : []
-          state.character = {
-            name,
-            persona: personaParts.join('\n') || '（角色卡未提供人设）',
-            scene: d.scenario ? String(d.scenario) : '',
-            status: {},
-            greeting: d.first_mes ? String(d.first_mes) : '',
-            examples: d.mes_example ? String(d.mes_example) : '',
-            ...(alts.length ? { altGreetings: alts } : {}),
-            mode: state.character && state.character.mode ? state.character.mode : 'default',
-          }
-          // 卡内嵌世界观 → 直接进世界书(与手动导入同一条路径, 关键词/常驻语义一致)
-          let loreCount = 0
-          const book = d.character_book || (read.json && read.json.character_book) || null
-          if (book) {
-            const entries = normalizeLoreList(book)
-            for (const raw of entries) {
-              const e = normalizeStLoreEntry(raw)
-              if (!e) continue
-              memory.worldbook = memory.worldbook || []
-              memory.worldbook.push({ id: makeLoreId(), ...e })
-              loreCount++
-            }
-            if (memory.worldbook && memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
-          }
-          state.enabled = true
-          state.lastHb = heartbeatKey(new Date())
-          const session = currentSession()
-          stageStartSeq = session ? session.seq : 0
-          saidGreeting = false
-          await saveState()
-          return { ok: true, name, lore: loreCount, message: '已导入 PNG 角色卡「' + name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (loreCount ? '，并导入内嵌世界观 ' + loreCount + ' 条。' : '。') }
+          const r = await importCardData(d)
+          if (!r.ok) return { ok: false, message: 'PNG 卡导入失败。' }
+          return { ok: true, name: r.name, lore: r.lore, savedCard: r.savedCard, message: '已导入 PNG 角色卡「' + r.name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，并导入内嵌世界观 ' + r.lore + ' 条' : '') + '，已存入卡库。' }
         } catch (e) {
           return { ok: false, message: 'PNG 卡解析失败：' + String((e && e.message) || e) }
         }

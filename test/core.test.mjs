@@ -127,7 +127,17 @@ async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reu
     async readBytes(p) { return readFileSync(p); },
     async writeText(p, c) { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, c); },
     async stat(p) { try { const s = readdirSync(p); return { size: 0 }; } catch { try { return { size: readFileSync(p).length }; } catch { return undefined; } } },
-    async listDir(p) { try { return readdirSync(p); } catch { return []; } },
+    async listDir(p) {
+      // ⚠️ 与真实 dsh-fs 契约对齐: listDir 返回 FsDirEntry[]{ name, type, target } —— 不是字符串数组。
+      // 老桩返回字符串, 于是"引擎把条目当文件名用"这类 bug(备份 L2/L3 整块静默失效)在单测里永远抓不到。
+      try {
+        return readdirSync(p, { withFileTypes: true }).map((d) => ({
+          name: d.name,
+          type: d.isDirectory() ? 'directory' : (d.isSymbolicLink() ? 'symlink' : 'file'),
+          target: join(p, d.name),
+        }));
+      } catch { return []; }
+    },
     async exists(p) { return existsSync(p); },
   };
   const ctx = {
@@ -1108,6 +1118,14 @@ console.log('\nT40 备份三层');
   ok(Array.isArray(snapDays) && snapDays.length >= 1, '每日快照目录已生成(独立于数据根)');
   const snapFiles = readdirSync(join(snap, snapDays[0]));
   ok(snapFiles.includes('character.json') && snapFiles.includes('progress-甲.json') && snapFiles.includes('cards.json'), '快照含卡库/进度(准实时, 同日写入不丢)');
+  // L2 全量快照 = 「💾 立即备份数据」按钮走的路径。
+  // 老代码把 fs.listDir() 的条目对象当文件名(path.join(entry) → "[object Object]") → 该按钮**从未成功过**。
+  const bn = await b.svc.backupNow({ sessionId: 't-session' });
+  ok(bn && bn.ok === true && bn.count >= 3, 'backupNow 全量快照成功(立即备份按钮)', JSON.stringify(bn));
+  const dayDir = join(snap, bn && bn.day ? bn.day : snapDays[snapDays.length - 1]);
+  const fullFiles = readdirSync(dayDir);
+  ok(fullFiles.includes('character.json') && fullFiles.includes('cards.json'), '全量快照含 character/卡库');
+  ok(!fullFiles.some((f) => f.includes('[object')), '快照文件名无 [object Object] 污染');
   // 模拟灾难: 删整个数据根(备份根独立幸存)
   rmSync(join(root, '.roleplay'), { recursive: true, force: true });
   ok(existsSync(snap), '数据根被删后备份仍在');
@@ -1426,7 +1444,38 @@ console.log('\nT44 真实ST素材兼容');
   const preSec = b.captured.sections.find((s) => s.name === 'roleplay.external-preset');
   const pt = preSec ? String(preSec.text()) : '';
   ok(pt.includes('森林少女') && !pt.includes('{{char}}'), '外部预设里的宏也展开');
+  // 导入必落卡库 + 旧角色被归档(修 ⑨⑩: 老实现只覆盖 state.character, 导入的卡切走就找不到,
+  // 上一个角色的人设也无声丢失——实测"卡库是空的, 只有一条虚拟条目")
+  const bI = await boot();
+  await bI.call('roleplay_start', { name: '旧角色', persona: '这是旧角色的人设文本，用于验证归档', greeting: '嗨' });
+  const impR = await bI.call('roleplay_import_char', { json: JSON.stringify({ spec: 'chara_card_v2', data: { name: '新角色', description: '新角色人设', first_mes: '你好', character_book: { entries: [{ keys: ['秘境'], content: '秘境入口在古井后。', enabled: true }] } } }) });
+  ok(impR && impR.ok === true && impR.savedCard === true, '导入返回 savedCard=true');
+  ok(impR && impR.lore === 1, '导入同时吃进内嵌世界观');
+  const cardsAfter = (await bI.svc.listCards({ sessionId: 't-session' })).cards;
+  ok(cardsAfter.some((c) => c.name === '新角色') && cardsAfter.some((c) => c.name === '旧角色'), '导入的卡与旧角色都在卡库里');
+  const cut = await bI.svc.loadCard({ sessionId: 't-session', card: '旧角色' });
+  const stOld = await bI.gs();
+  ok(cut.ok === true && stOld.character.name === '旧角色' && String(stOld.character.persona).includes('旧角色的人设'), '旧角色人设被归档后可完整切回');
+  rmSync(bI.root, { recursive: true, force: true });
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T45 客户端协议契约: 业务失败必须能透出真实原因 ───
+// 起因(真机实测): 桥接对业务失败返回 { ok:false, value:{ ok:false, message:'她刚吃过东西…' } },
+// 客户端老写法 `result.ok && result.value` 只认 HTTP 层 ok=true → 引擎给的原因
+// (喂食冷却/金币不足/卡解析失败…) 全被替换成笼统的"操作失败"。改为统一 unwrap()。
+console.log('\nT45 客户端失败原因透传');
+{
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+  const clientSrc = readFileSync(join(repoRoot, 'lib', 'client.js'), 'utf8');
+  const codeLines = clientSrc.split('\n').filter((l) => !l.trim().startsWith('//'));
+  const bad = codeLines.filter((l) => /result\.ok && result\.value \?/.test(l));
+  ok(bad.length === 0, 'client.js 不再用 `result.ok && result.value ?` 吞掉业务失败原因', bad.slice(0, 2).join(' | '));
+  ok(/var unwrap = function \(result\)/.test(clientSrc), 'client.js 定义了 unwrap()');
+  ok(/unwrap\(result\)/.test(clientSrc), 'client.js 使用了 unwrap()');
+  // 桥接契约: 业务失败仍带 value.message(客户端才能显示原因)
+  const bridgeSrc = readFileSync(join(repoRoot, 'lib', 'index.js'), 'utf8');
+  ok(/return \{ ok: !!value\.ok, value \}/.test(bridgeSrc), '桥接业务失败仍回传 value(含 message)');
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
