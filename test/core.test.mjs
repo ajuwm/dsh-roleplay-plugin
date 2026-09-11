@@ -1478,5 +1478,119 @@ console.log('\nT45 客户端失败原因透传');
   ok(/return \{ ok: !!value\.ok, value \}/.test(bridgeSrc), '桥接业务失败仍回传 value(含 message)');
 }
 
+// ─── T46 v1.5.23: 原图/缩略图/无损导出/卡库画廊/世界书编辑/JSON卡/预设条目/上下文 ───
+console.log('\nT46 卡库与原图(P0/P1)');
+{
+  const P = await import(new URL('../agent-presets/roleplay/lib/png-card.mjs', import.meta.url).href);
+  const { createHash } = await import('node:crypto');
+  const realPath = 'D:\\dsh\\rp-test\\assets\\st-card-seraphina.png';
+  const useReal = existsSync(realPath);
+  const srcPng = useReal ? readFileSync(realPath) : P.placeholderPng(200, 300);
+  const head = P.pngSize(srcPng);
+  ok(head && head.width > 0 && head.height > 0, 'pngSize 读出尺寸(' + (useReal ? '真实素材' : '占位图') + ')');
+  const dec = P.decodePng(srcPng);
+  ok(dec && dec.rgba.length === dec.width * dec.height * 4, 'decodePng 解出 RGBA');
+  const small = P.downscaleRgba(dec, 128);
+  ok(small && Math.max(small.width, small.height) <= 128, 'downscale 长边 ≤128');
+  const thumbPng = P.encodePng(small);
+  ok(Buffer.isBuffer(thumbPng) && thumbPng.subarray(0, 8).toString('hex') === '89504e470d0a1a0a', 'encodePng 产出合法 PNG');
+  const dec2 = P.decodePng(thumbPng);
+  ok(dec2 && dec2.width === small.width && dec2.height === small.height, '缩略图可被自己解码(尺寸一致)');
+  ok(P.makeThumbnail(Buffer.from('not a png'), 128) === null, '非 PNG 生成缩略图返回 null(上层回退)');
+  const stripText = (buf) => {
+    const out = []; let off = 8
+    while (off + 8 <= buf.length) {
+      const len = buf.readUInt32BE(off); const t = buf.toString('ascii', off + 4, off + 8)
+      if (t !== 'tEXt' && t !== 'zTXt' && t !== 'iTXt') out.push(buf.subarray(off, off + 8 + len + 4))
+      off = off + 8 + len + 4
+      if (t === 'IEND') break
+    }
+    return Buffer.concat(out)
+  }
+  if (useReal) {
+    const rt = P.writeCardToPng({ spec: 'chara_card_v2', data: { name: 'x' } }, srcPng)
+    ok(createHash('sha256').update(stripText(rt)).digest('hex') === createHash('sha256').update(stripText(srcPng)).digest('hex'), '导出保留原图像素(非文本块 sha256 一致)')
+  }
+  const b = await boot();
+  const cardJson = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: '画中仙', description: '人设文本', first_mes: '你好', mes_example: '示例对话', character_book: { entries: [{ keys: ['画'], content: '画中有世界。', enabled: true }] } } }
+  const cardPng = P.writeCardToPng(cardJson, useReal ? srcPng : null)
+  const imp = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64') })
+  ok(imp && imp.ok === true && imp.name === '画中仙', '导入 PNG 卡成功');
+  ok(imp.withArt === true, '导入时保留了原图(withArt)');
+  const st0 = await b.gs();
+  ok(st0.hasArt === true, 'getState 暴露 hasArt');
+  const art = await b.svc.cardArt({ sessionId: 't-session', card: '画中仙' });
+  ok(art && art.ok && art.base64 && art.kind === 'thumb', 'card-art 返回缩略图');
+  const exp = await b.svc.cardExportPng({ sessionId: 't-session', card: '画中仙' });
+  ok(exp && exp.ok && exp.withArt === true, '导出带原图');
+  ok(P.readCardFromPng(Buffer.from(exp.base64, 'base64')).json.data.mes_example === '示例对话', '导出保留 mes_example(旧实现写死空串)');
+  if (useReal) {
+    ok(createHash('sha256').update(stripText(Buffer.from(exp.base64, 'base64'))).digest('hex') === createHash('sha256').update(stripText(cardPng)).digest('hex'), '导出的图像与导入时一致(往返无损)')
+  }
+  const brief = await b.svc.cardBrief({ sessionId: 't-session' });
+  ok(brief && brief.ok && brief.cards.length === 1 && brief.cards[0].hasArt === true, 'cardBrief 画廊数据(含头像标记)');
+  const det = await b.svc.cardDetail({ sessionId: 't-session', card: '画中仙' });
+  ok(det && det.ok && det.card.persona === '人设文本' && det.card.examples === '示例对话', 'cardDetail 返回完整可编辑字段');
+  const up = await b.svc.cardUpdate({ sessionId: 't-session', id: det.card.id, name: '画中仙', fields: { persona: '改过的人设', altGreetings: ['备选一'] } });
+  ok(up && up.ok, 'cardUpdate 保存字段');
+  const det2 = await b.svc.cardDetail({ sessionId: 't-session', card: '画中仙' });
+  ok(det2.card.persona === '改过的人设' && det2.card.altGreetings.length === 1, '编辑生效');
+  const ren = await b.svc.cardUpdate({ sessionId: 't-session', id: det.card.id, fields: { name: '画中仙2' } });
+  ok(ren && ren.ok && ren.renamed === true, '改名成功(UI 走 fields.name)');
+  const artRenamed = await b.svc.cardArt({ sessionId: 't-session', card: '画中仙2' });
+  ok(artRenamed && artRenamed.ok && artRenamed.base64, '改名后原图跟随(不会丢头像)');
+  const dupA = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64') })
+  ok(dupA.ok === true && dupA.name === '画中仙', '首次导入建卡(此时库里只有改名后的「画中仙2」)')
+  const dup2 = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64') })
+  ok(dup2.duplicate === true, '同名且未指定覆盖 → 返回 duplicate(由 UI 询问)')
+  const dup3 = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64'), overwrite: true })
+  ok(dup3.ok === true, '指定 overwrite → 覆盖成功')
+  const dup4 = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64'), saveAsName: '画中仙' })
+  ok(dup4.ok === true && /画中仙 \(2\)/.test(dup4.name), '另存撞名 → 自动顺延为「画中仙 (2)」(不静默覆盖)')
+  const brief2 = await b.svc.cardBrief({ sessionId: 't-session' });
+  ok(brief2.cards.length === 3, '卡库三张(覆盖不新增, 另存新增)')
+  const before = (await b.svc.loreList({ sessionId: 't-session' })).length
+  const re = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64'), saveAsName: '画中仙4' })
+  const after = (await b.svc.loreList({ sessionId: 't-session' })).length
+  ok(re.lore === 0 && re.loreSkipped >= 1, '重复导入的内嵌世界观被跳过(lore=0, skipped≥1)')
+  ok(after === before, '世界书条数不增长(' + before + '→' + after + ')')
+  const list = await b.svc.loreList({ sessionId: 't-session' })
+  const e0 = list[0]
+  await b.svc.loreUpdate({ sessionId: 't-session', id: e0.id, fields: { enabled: false } })
+  const ll = await b.svc.loreList({ sessionId: 't-session' })
+  ok(ll.find((x) => x.id === e0.id).enabled === false, '世界书条目可停用')
+  const lu = await b.svc.loreUpdate({ sessionId: 't-session', id: e0.id, fields: { content: '画中有世界(改)', keywords: '画,世界', priority: 3 } })
+  ok(lu && lu.ok && lu.entry.keywords.length === 2 && lu.entry.priority === 3, '条目内容/关键词/优先级可编辑')
+  ok((await b.svc.loreAdd({ sessionId: 't-session', content: '' })).ok === false, '空内容新增被拒')
+  ok((await b.svc.loreAdd({ sessionId: 't-session', content: '无关键词非要新增' })).ok === false, '既无关键词又非常驻 → 拒绝')
+  ok((await b.svc.loreAdd({ sessionId: 't-session', content: '新条目内容', keywords: '新词' })).ok === true, 'loreAdd 成功')
+  const stPreset = { name: '条目预设', prompts: [
+    { identifier: 'main', name: 'Main', role: 'system', content: '主提示词内容' },
+    { identifier: 'chatHistory', name: 'History', role: 'system', marker: true, content: '' },
+    { identifier: 'jailbreak', name: 'PHI', role: 'system', content: '回合后要求内容' },
+  ] }
+  await b.svc.presetImport({ sessionId: 't-session', json: JSON.stringify(stPreset), filename: 'items.json' })
+  const pl = await b.svc.presetList({ sessionId: 't-session' })
+  const target = pl.find((x) => x.name === '条目预设')
+  ok(target && target.items === 2, '预设条目数正确(marker 不算)')
+  const pitems = await b.svc.presetItems({ sessionId: 't-session', id: target.id })
+  ok(pitems.ok && pitems.items.length === 2 && pitems.items.every((x) => x.enabled === true), '条目默认全开')
+  await b.svc.presetSetEnabled({ sessionId: 't-session', id: target.id, enabled: true })
+  const secOn = b.captured.sections.find((s) => s.name === 'roleplay.external-preset')
+  ok(secOn && String(secOn.text()).includes('主提示词内容'), '启用后注入条目内容')
+  const off = await b.svc.presetSetItem({ sessionId: 't-session', id: target.id, index: 0, enabled: false })
+  ok(off.ok && off.items[0].enabled === false, '逐条停用生效')
+  const secOff = b.captured.sections.find((s) => s.name === 'roleplay.external-preset')
+  ok(!String(secOff.text()).includes('主提示词内容'), '停用的条目不进提示词')
+  const stCtx = await b.gs()
+  ok(stCtx.promptStats && typeof stCtx.promptStats.total === 'number', 'getState 暴露 promptStats')
+  ok(stCtx.promptStats.sections && Object.keys(stCtx.promptStats.sections).length >= 1, 'promptStats 含分段与 token 估算')
+  const v1 = await b.svc.cardImportJson({ sessionId: 't-session', json: JSON.stringify({ name: 'V1卡', description: 'v1 人设', first_mes: 'hi' }) })
+  ok(v1 && v1.ok === true && v1.name === 'V1卡', 'JSON(V1 裸对象) 卡导入')
+  const bk = await b.svc.backupNow({ sessionId: 't-session' })
+  ok(bk && bk.ok === true && bk.count >= 3, 'backupNow 在含 art/thumb 时仍成功(' + (bk && bk.count) + ' 文件)')
+  rmSync(b.root, { recursive: true, force: true });
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

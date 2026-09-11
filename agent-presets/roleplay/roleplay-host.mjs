@@ -14,7 +14,7 @@ import { applyDelta, reqCheck, relationStageOf, computeStageOf, repeatDimOf, dim
 import { periodOf, missClassify } from './lib/time-core.mjs?v=15'
 import { pickMessages, historyMessages } from './lib/chat-core.mjs?v=2'
 import { noteCreate, noteAck, visibleNotes, dueNotes, mergeNotes } from './lib/notes-core.mjs?v=1'
-import { readCardFromPng, writeCardToPng } from './lib/png-card.mjs?v=2'
+import { readCardFromPng, writeCardToPng, makeThumbnail, pngSize } from './lib/png-card.mjs?v=3'
 import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twentyGuess, tttStart, tttApply, truthStart, truthDraw, truthTierOf, guessHintText, tttBoardText, TWENTY_WORDS, TRUTH_PROMPTS } from './lib/game-core.mjs?v=1'
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
@@ -1693,11 +1693,12 @@ export function apply(ctx, config) {
         try { data = JSON.parse(String(args.json)) } catch (e) { return { ok: false, message: 'JSON 解析失败：' + String(e && e.message ? e.message : e) } }
       }
       const d = data && data.data ? data.data : data
-      const r = await importCardData(d)
+      const r = await importCardData(d, { overwrite: !!(args && args.overwrite), saveAsName: args && args.saveAsName, artBase64: args && args.png ? String(args.png) : null })
+      if (!r.ok && r.duplicate) return { ok: false, duplicate: true, name: r.name, message: '卡库里已有同名角色「' + r.name + '」，要覆盖还是另存为？' }
       if (!r.ok) return { ok: false, message: '导入失败。' }
       memory.events_count['初次对话'] = (memory.events_count['初次对话'] || 0) + 1
       await saveState()
-      return { ok: true, name: r.name, lore: r.lore, savedCard: r.savedCard, message: '已导入角色「' + r.name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，并导入内嵌世界观 ' + r.lore + ' 条' : '') + '，已存入卡库。' }
+      return { ok: true, name: r.name, lore: r.lore, loreSkipped: r.loreSkipped, savedCard: r.savedCard, message: '已导入角色「' + r.name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，并导入内嵌世界观 ' + r.lore + ' 条' + (r.loreSkipped ? '（跳过重复 ' + r.loreSkipped + ' 条）' : '') : '') + '，已存入卡库。' }
     })
 
     async function rememberImpl(args) {
@@ -2055,6 +2056,42 @@ export function apply(ctx, config) {
     // 切换/新建角色前自动保存当前角色为卡：保证旧人设永远可切回，不再被覆盖丢失。
     // 已存在同名卡则跳过（不重复）；返回已保存的卡。
     // 角色卡 ⇄ 当前角色 的唯一映射(此前各处手抄字段, 导致 examples/altGreetings 在切卡往返时丢失)
+    // ── 卡原图 sidecar(fs 无 writeBytes → base64 文本; 扁平存放, 备份/恢复无需改动) ──
+    function artPath(name, kind) { return REL_ROOT + '/' + (kind === 'thumb' ? 'thumb-' : 'art-') + charKeyFor(name) + '.txt' }
+    async function writeArt(name, kind, base64) {
+      try { await fs.writeText(await resolveFile(artPath(name, kind)), String(base64), undefined, undefined, policyFor()); return true } catch (e) { return false }
+    }
+    async function readArt(name, kind) {
+      try {
+        const t = await resolveFile(artPath(name, kind))
+        const info = await fs.stat(t)
+        if (info === undefined) return null
+        const txt = String(await fs.readText(t)).trim()
+        return txt || null
+      } catch (e) { return null }
+    }
+    async function removeArt(name) {
+      for (const kind of ['art', 'thumb']) {
+        try {
+          const t = await resolveFile(artPath(name, kind))
+          const info = await fs.stat(t)
+          if (info === undefined) continue
+          await fs.writeText(t, '', undefined, undefined, policyFor())   // 清空内容(不删文件, 避免 fs 无删除原语时抛错)
+        } catch (e) { /* 忽略 */ }
+      }
+    }
+    // 世界书去重键: 归一化内容 + 排序关键词(重复导入同一张卡不再累积)
+    function loreKey(e) {
+      const c = String((e && e.content) || '').replace(/\s+/g, ' ').trim()
+      const k = (Array.isArray(e && e.keywords) ? e.keywords : []).map((x) => String(x).trim().toLowerCase()).filter(Boolean).sort().join(',')
+      return k + '\u0000' + c
+    }
+    function findDuplicateLore(e) {
+      const key = loreKey(e)
+      if (!key || key === '\u0000') return null
+      return (memory.worldbook || []).find((x) => loreKey(x) === key) || null
+    }
+
     function characterFromCard(card) {
       if (!card || !card.name) return null
       return {
@@ -2098,26 +2135,63 @@ export function apply(ctx, config) {
     }
 
     // 导入角色卡(JSON 卡 / PNG 卡同一条路径)。
-    // 修复两个实测缺陷:
-    //   ⑨ 老实现只覆盖 state.character —— 导入的卡**不进卡库**, 切走后卡就找不到了
-    //      ("卡库"里那条只是当前角色的虚拟条目, 一旦切走即消失);
-    //   ⑩ 覆盖前不归档 → 上一个角色的人设被无声丢弃(记忆/进度还在, 人设没了)。
-    // 现在: 先归档旧角色(persist + autoSave)→ 写新角色 → 卡库 upsert → 吃内嵌 character_book → 开演。
-    async function importCardData(d) {
+    // 修复实测缺陷:
+    //   ⑨ 老实现只覆盖 state.character —— 导入的卡不进卡库, 切走后卡就找不到;
+    //   ⑩ 覆盖前不归档 → 上一个角色的人设被无声丢弃;
+    //   ⑮ 原图不保留 → 导出只能是白占位图, 卡库也没有头像可用。
+    // 现在: 归档旧角色 → 写原图/缩略图 sidecar → 写新角色 → 卡库 upsert(同名可另存) → 吃内嵌世界观(去重) → 开演。
+    async function importCardData(d, opts) {
+      const o = opts || {}
       const name = String(d.name || d.char_name || '').trim() || '未知角色'
+      const cards0 = await readCards()
+      let finalName = o.saveAsName ? String(o.saveAsName).trim().slice(0, 60) : name
+      if (o.saveAsName && !o.overwrite) {
+        // 另存为: 撞名就顺延找空位(绝不静默覆盖已有卡)
+        if (cards0.some((c) => c.name === finalName)) {
+          const base = finalName.replace(/\s*\(\d+\)$/, '')
+          let n = 2
+          while (cards0.some((c) => c.name === base + ' (' + n + ')')) n++
+          finalName = (base + ' (' + n + ')').slice(0, 60)
+        }
+      } else {
+        const dup = cards0.find((c) => c.name === finalName)
+        if (dup && !o.overwrite) {
+          // 同名已存在且未明确要求覆盖 → 交给上层询问"覆盖 / 另存为"
+          return { ok: false, duplicate: true, name: finalName }
+        }
+      }
       try {
         const oldKey = charKey()
         await persistMemory(oldKey)
         await persistProgress(oldKey)
         await autoSaveCurrentCard()
       } catch (e) { console.error('roleplay: import archive failed', e) }
+      // 原图 + 缩略图 sidecar(fs 只有 writeText → 存 base64 文本, 数据根保持"扁平纯文本",
+      // 这样 L1 .bak / L2 快照 / L3 恢复 / L4 镜像全都不需要改动)
+      let artSaved = false, thumbSaved = false
+      if (o.artBase64) {
+        try {
+          const pngBytes = Buffer.from(String(o.artBase64), 'base64')
+          if (pngBytes.length > 8) {
+            await fs.writeText(await resolveFile(REL_ROOT + '/art-' + charKeyFor(finalName) + '.txt'), Buffer.from(pngBytes).toString('base64'), undefined, undefined, policyFor())
+            artSaved = true
+            try {
+              const thumb = makeThumbnail(pngBytes, 128)
+              if (thumb) {
+                await fs.writeText(await resolveFile(REL_ROOT + '/thumb-' + charKeyFor(finalName) + '.txt'), thumb.toString('base64'), undefined, undefined, policyFor())
+                thumbSaved = true
+              }
+            } catch (e) { /* 缩略图失败不影响导入(回退字母头像) */ }
+          }
+        } catch (e) { console.error('roleplay: card art save failed', e) }
+      }
       const personaParts = [d.description, d.personality, d.system_prompt].filter(Boolean).map(String)
       const phi = String(d.post_history_instructions || '').trim()
       if (phi) personaParts.push('【回合后要求】' + phi)
       const alts = Array.isArray(d.alternate_greetings)
         ? d.alternate_greetings.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3) : []
       state.character = {
-        name,
+        name: finalName,
         persona: personaParts.join('\n') || '（角色卡未提供人设）',
         scene: d.scenario ? String(d.scenario) : '',
         status: {},
@@ -2126,25 +2200,29 @@ export function apply(ctx, config) {
         ...(alts.length ? { altGreetings: alts } : {}),
         mode: state.character && state.character.mode ? state.character.mode : 'default',
       }
-      // 卡内嵌世界观 → 世界书(与手动导入同一条路径)
-      let loreCount = 0
+      // 卡内嵌世界观 → 世界书(去重: 同一张卡重复导入不再累积重复条目)
+      let loreCount = 0, loreSkipped = 0
       const book = d.character_book || null
       if (book) {
         memory.worldbook = memory.worldbook || []
         for (const raw of normalizeLoreList(book)) {
           const e = normalizeStLoreEntry(raw)
           if (!e) continue
-          memory.worldbook.push({ id: makeLoreId(), ...e })
+          if (findDuplicateLore(e)) { loreSkipped++; continue }
+          memory.worldbook.push({ id: makeLoreId(), ...e, fromCard: finalName })
           loreCount++
         }
         if (memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
       }
-      // 写入卡库(同名 upsert, 保留原 id)
+      // 写入卡库(保留原始 data 快照 → 导出时可无损还原全部字段)
       let savedCard = false
       try {
         const cards = await readCards()
-        const fresh = cardFromCharacter(state.character, 'card-' + charKeyFor(name))
-        const ex = cards.find((c) => c.name === name)
+        const ex = cards.find((c) => c.name === finalName)
+        const keepId = (ex && o.overwrite) ? ex.id : ('card-' + charKeyFor(finalName))
+        const fresh = cardFromCharacter(state.character, keepId)
+        fresh.rawData = JSON.parse(JSON.stringify(d))
+        if (artSaved) fresh.hasArt = true
         if (ex) Object.assign(ex, fresh, { id: ex.id, savedAt: new Date().toISOString() })
         else cards.push(fresh)
         await writeCards(cards)
@@ -2156,7 +2234,7 @@ export function apply(ctx, config) {
       stageStartSeq = session ? session.seq : 0
       saidGreeting = false
       await saveState()
-      return { ok: true, name, lore: loreCount, savedCard }
+      return { ok: true, name: finalName, lore: loreCount, loreSkipped, savedCard, artSaved, thumbSaved }
     }
 
     registerTool('roleplay_save_card', '把当前扮演的角色保存为一张角色卡（多卡库）。之后用 roleplay_load_card 可随时切回；桌宠互动也会以该角色回应。用户说「保存角色卡/存卡」时调用。', {
@@ -2639,8 +2717,26 @@ export function apply(ctx, config) {
         .replace(/\{\{\s*persona\s*\}\}/gi, userName)
     }
 
+    // 上下文可视化(P1-6): 记录"最近一次构建提示词"时每个段落的字符数, 供侧栏展示
+    const promptStats = { at: null, sections: {}, total: 0 }
+    function recordSection(name, text) {
+      const n = String(text || '').length
+      promptStats.sections[name] = n
+      promptStats.total = Object.values(promptStats.sections).reduce((a, b) => a + b, 0)
+      promptStats.at = stamp()
+      return text
+    }
+
+    // 段落注册包裹: 自动记录每段字符数(上下文可视化 P1-6)
+    function addSection(cfg) {
+      if (!systemPrompt) return
+      const orig = cfg && typeof cfg.text === 'function' ? cfg.text : null
+      if (orig) cfg.text = () => recordSection(cfg.name, orig())
+      systemPrompt.section(cfg)
+    }
+
     if (systemPrompt) {
-      systemPrompt.section({
+      addSection({
         name: 'roleplay.character',
         order: 200,
         text: () => {
@@ -2846,7 +2942,7 @@ export function apply(ctx, config) {
         },
       })
       // 启用的外部预设(ST 兼容): 风险自担, 明确标记来源
-      systemPrompt.section({
+      addSection({
         name: 'roleplay.external-preset',
         order: 204,
         text: () => {
@@ -2855,14 +2951,16 @@ export function apply(ctx, config) {
           if (!enabled.length) return ''
           const lines = ['【外部预设(用户导入, 风险自担)】']
           for (const p of enabled) {
-            if (p.prompt) lines.push('〈' + p.name + '〉写作要求: ' + expandStMacros(String(p.prompt).slice(0, 600)))
-            if (p.postHistoryInstructions) lines.push('〈' + p.name + '〉回合后要求: ' + expandStMacros(String(p.postHistoryInstructions).slice(0, 300)))
+            const mainText = presetEffectiveText(p, 'main')
+            const phiText = presetEffectiveText(p, 'phi')
+            if (mainText) lines.push('〈' + p.name + '〉写作要求: ' + expandStMacros(String(mainText).slice(0, 600)))
+            if (phiText) lines.push('〈' + p.name + '〉回合后要求: ' + expandStMacros(String(phiText).slice(0, 300)))
           }
           return lines.join('\n')
         },
       })
       // 关系档位行为: 称呼/语气/主动度随阶段变化(自然流露, 不报数字)
-      systemPrompt.section({
+      addSection({
         name: 'roleplay.tier-behavior',
         order: 205,
         text: () => {
@@ -2874,7 +2972,7 @@ export function apply(ctx, config) {
         },
       })
       // 祛魅: 她把用户当真的人(去滤镜、清醒的爱、不批发好感)
-      systemPrompt.section({
+      addSection({
         name: 'roleplay.no-halo',
         order: 206,
         text: () => {
@@ -3021,6 +3119,46 @@ export function apply(ctx, config) {
     }
     function makeLoreId() { return 'w' + Date.now() + Math.random().toString(36).slice(2, 5) }
 
+    // ── ST 预设条目化(P1-5): 提示词在 raw.prompts[] 里, marker:true 是占位符 ──
+    function presetEntryList(p) {
+      const out = []
+      if (!p || !Array.isArray(p.prompts)) return out
+      const dis = (state.presetItems && state.presetItems[p.id]) || {}
+      for (let i = 0; i < p.prompts.length; i++) {
+        const it = p.prompts[i]
+        if (!it || typeof it !== 'object') continue
+        const content = String(it.content || '')
+        if (!content) continue                        // marker/空条目不展示
+        const key = String(i)
+        out.push({
+          index: i,
+          name: String(it.name || it.identifier || ('条目 ' + (i + 1))).slice(0, 40),
+          identifier: String(it.identifier || ''),
+          role: String(it.role || 'system'),
+          length: content.length,
+          preview: content.replace(/\s+/g, ' ').slice(0, 80),
+          enabled: dis[key] !== undefined ? !!dis[key] : true,   // 默认全开(与旧整体行为一致)
+        })
+      }
+      return out
+    }
+    function presetItemCount(p) {
+      try { return presetEntryList(p).length } catch (e) { return 0 }
+    }
+    // 取"实际参与注入"的预设文本: 有条目化数据 → 按启用条目拼接; 否则用旧的整体 prompt
+    function presetEffectiveText(p, kind) {
+      const list = presetEntryList(p)
+      if (!list.length) return kind === 'phi' ? String(p.postHistoryInstructions || '') : String(p.prompt || '')
+      const parts = []
+      for (const it of list) {
+        if (!it.enabled) continue
+        if (kind === 'phi' && it.identifier !== 'jailbreak') continue
+        if (kind !== 'phi' && it.identifier === 'jailbreak') continue
+        parts.push(p.prompts[it.index].content)
+      }
+      return parts.join('\n\n')
+    }
+
     ctx.provide('roleplay', {
       getState: async (args) => {
         adoptAgent(args)
@@ -3083,6 +3221,9 @@ export function apply(ctx, config) {
           diaryView,
           lastTurn: lastTurnAudit,
           hbDiag,
+          // 上下文可视化(P1-6): 最近一次提示词各段字符数 + 估算 token(中文约 1.6 字/token)
+          promptStats: { at: promptStats.at, sections: { ...promptStats.sections }, total: promptStats.total, estTokens: Math.round(promptStats.total / 1.6) },
+          hasArt: (state.character && state.character.name) ? !!(await readArt(state.character.name, 'art')) : false,
         }
       },
       // 轻量信息(对话侧栏目标列表):不触发心跳/衰减等副作用,只读当前状态
@@ -3204,9 +3345,10 @@ export function apply(ctx, config) {
           const buf = Buffer.from(String((args && args.base64) || ''), 'base64')
           const read = readCardFromPng(buf)
           const d = read.json && read.json.data ? read.json.data : read.json
-          const r = await importCardData(d)
+          const r = await importCardData(d, { overwrite: !!(args && args.overwrite), saveAsName: args && args.saveAsName, artBase64: buf.toString('base64') })
+          if (!r.ok && r.duplicate) return { ok: false, duplicate: true, name: r.name, message: '卡库里已有同名角色「' + r.name + '」，要覆盖还是另存为？' }
           if (!r.ok) return { ok: false, message: 'PNG 卡导入失败。' }
-          return { ok: true, name: r.name, lore: r.lore, savedCard: r.savedCard, message: '已导入 PNG 角色卡「' + r.name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，并导入内嵌世界观 ' + r.lore + ' 条' : '') + '，已存入卡库。' }
+          return { ok: true, name: r.name, lore: r.lore, loreSkipped: r.loreSkipped, withArt: r.artSaved, savedCard: r.savedCard, message: '已导入 PNG 角色卡「' + r.name + '」' + (state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，并导入内嵌世界观 ' + r.lore + ' 条' + (r.loreSkipped ? '（跳过重复 ' + r.loreSkipped + ' 条）' : '') : '') + (r.artSaved ? '，原图已保留' : '') + '。' }
         } catch (e) {
           return { ok: false, message: 'PNG 卡解析失败：' + String((e && e.message) || e) }
         }
@@ -3218,25 +3360,181 @@ export function apply(ctx, config) {
           const cards = await readCards()
           const name = String((args && args.card) || (state.character && state.character.name) || '')
           const card = cards.find((c) => c.name === name) || null
-          const json = { spec: 'chara_card_v2', spec_version: '2.0', data: {
+          // 有原始 data 快照 → 无损还原全部字段; 没有则按当前字段尽力拼
+          const raw = (card && card.rawData && typeof card.rawData === 'object') ? JSON.parse(JSON.stringify(card.rawData)) : null
+          const base = raw || {}
+          const data = Object.assign({}, base.data ? base.data : base, {
             name: name,
-            description: (card && card.persona) || (state.character && state.character.persona) || '',
-            personality: '',
-            first_mes: (card && card.greeting) || (state.character && state.character.greeting) || '',
-            mes_example: '',
-            scenario: (card && card.scene) || (state.character && state.character.scene) || '',
-          } }
-          const bytes = writeCardToPng(json, null)
-          return { ok: true, base64: bytes.toString('base64'), name }
+            description: String((base.data && base.data.description) || (base.description) || (card && card.persona) || (state.character && state.character.persona) || ''),
+            first_mes: String((base.data && base.data.first_mes) || (base.first_mes) || (card && card.greeting) || (state.character && state.character.greeting) || ''),
+            mes_example: String((base.data && base.data.mes_example) || (base.mes_example) || (card && card.examples) || (state.character && state.character.examples) || ''),
+            scenario: String((base.data && base.data.scenario) || (base.scenario) || (card && card.scene) || (state.character && state.character.scene) || ''),
+          })
+          if (!Array.isArray(data.alternate_greetings) && card && Array.isArray(card.altGreetings) && card.altGreetings.length) {
+            data.alternate_greetings = card.altGreetings.slice()
+          }
+          // 导出的世界书: 优先用原始 character_book; 否则把该卡导入过的条目还回
+          if (!data.character_book && Array.isArray(memory.worldbook) && memory.worldbook.length) {
+            const fromLore = memory.worldbook.filter((e) => e && e.fromCard === name && e.enabled !== false)
+            if (fromLore.length) {
+              data.character_book = { name: name + ' book', entries: fromLore.map((e, i) => ({ id: i, keys: Array.isArray(e.keywords) ? e.keywords : [], content: e.content, constant: !!e.constant, enabled: true, insertion_order: e.priority || 0 })) }
+            }
+          }
+          const json = { spec: 'chara_card_v2', spec_version: '2.0', data }
+          // 关键: 带上原图 → 图像零损失(老实现恒定 null → 白占位图)
+          const artB64 = await readArt(name, 'art')
+          let basePng = null
+          if (artB64) {
+            try { const buf = Buffer.from(artB64, 'base64'); if (buf.length > 8) basePng = buf } catch (e) { /* 用占位图 */ }
+          }
+          const bytes = writeCardToPng(json, basePng)
+          return { ok: true, base64: bytes.toString('base64'), name, withArt: !!basePng, bytes: bytes.length }
         } catch (e) {
           return { ok: false, message: '导出失败：' + String((e && e.message) || e) }
+        }
+      },
+      // 卡详情(编辑面板用: 完整可编辑字段)
+      cardDetail: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const key = String((args && args.card) || '')
+        const cards = await readCards()
+        let c = cards.find((x) => x.id === key) || cards.find((x) => x.name === key)
+        if (!c && state.character && state.character.name === key) c = cardFromCharacter(state.character, 'card-' + charKey())
+        if (!c) return { ok: false, message: '没有找到这张卡。' }
+        const art = await readArt(c.name, 'thumb')
+        return {
+          ok: true,
+          card: {
+            id: c.id, name: c.name, virtual: !cards.some((x) => x.name === c.name),
+            persona: String(c.persona || ''), scene: String(c.scene || ''), greeting: String(c.greeting || ''),
+            examples: String(c.examples || ''), altGreetings: Array.isArray(c.altGreetings) ? c.altGreetings.slice() : [],
+            hasArt: !!art,
+            creator: (c.rawData && (c.rawData.creator || c.rawData.creator_notes)) || null,
+            version: (c.rawData && c.rawData.character_version) || null,
+          },
+        }
+      },
+      // 卡库画廊用: 轻量列表(名字/摘要/是否有原图)
+      cardBrief: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const cards = await readCards()
+        const out = []
+        for (const c of cards) {
+          const art = await readArt(c.name, 'thumb')
+          out.push({
+            id: c.id, name: c.name,
+            summary: String(c.persona || '').replace(/\s+/g, ' ').slice(0, 40),
+            hasArt: !!art, greeting: String(c.greeting || '').slice(0, 60),
+            personaLen: String(c.persona || '').length,
+            altCount: Array.isArray(c.altGreetings) ? c.altGreetings.length : 0,
+            examplesLen: String(c.examples || '').length,
+          })
+        }
+        // 当前角色未入库时补一条虚拟项(与 listCards 口径一致)
+        if (state.character && state.character.name && !out.some((x) => x.name === state.character.name)) {
+          const art = await readArt(state.character.name, 'thumb')
+          out.push({ id: 'card-' + charKey(), name: state.character.name, summary: String(state.character.persona || '').replace(/\s+/g, ' ').slice(0, 40), hasArt: !!art, virtual: true })
+        }
+        return { ok: true, cards: out }
+      },
+      // 取卡图(优先缩略图, 回退原图)
+      cardArt: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const name = String((args && args.card) || '')
+        const kind = args && args.full ? 'art' : 'thumb'
+        let b64 = await readArt(name, kind)
+        let used = kind
+        if (!b64 && kind === 'thumb') { b64 = await readArt(name, 'art'); used = 'art' }
+        if (!b64) return { ok: false, message: '这张卡没有原图。' }
+        return { ok: true, name, kind: used, base64: b64 }
+      },
+      // 卡详情编辑(人设/场景/开场白/备选开场白/样例; 改名会同步搬移原图)
+      cardUpdate: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const name = String((args && args.name) || '')
+        const cards = await readCards()
+        const card = cards.find((c) => c.id === id || c.name === name)
+        if (!card) return { ok: false, message: '没有找到这张卡。' }
+        const f = (args && args.fields) || {}
+        const oldName = card.name
+        // 新名字: 优先 fields.name(UI 编辑草稿), 回退顶层 name(便于脚本调用)
+        const nameRaw = (typeof f.name === 'string' && f.name.trim()) ? f.name : ((typeof name === 'string' && name.trim()) ? name : '')
+        const newName = nameRaw ? nameRaw.trim().slice(0, 60) : oldName
+        if (newName !== oldName && cards.some((c) => c !== card && c.name === newName)) {
+          return { ok: false, message: '已存在同名角色卡「' + newName + '」。' }
+        }
+        if (typeof f.persona === 'string') card.persona = f.persona
+        if (typeof f.scene === 'string') card.scene = f.scene
+        if (typeof f.greeting === 'string') card.greeting = f.greeting
+        if (typeof f.examples === 'string') card.examples = f.examples
+        if (Array.isArray(f.altGreetings)) card.altGreetings = f.altGreetings.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3)
+        card.name = newName
+        card.savedAt = new Date().toISOString()
+        if (newName !== oldName) {
+          // 搬移原图 sidecar(否则改名后头像/导出会丢)
+          for (const kind of ['art', 'thumb']) {
+            const b64 = await readArt(oldName, kind)
+            if (b64) { await writeArt(newName, kind, b64); await removeArt(oldName) }
+          }
+        }
+        await writeCards(cards)
+        // 当前正在演的角色 → 同步到运行态
+        if (state.character && state.character.name === oldName) {
+          state.character = { ...characterFromCard(card), status: state.character.status || {}, mode: state.character.mode || 'default' }
+          await saveState()
+        }
+        return { ok: true, id: card.id, name: card.name, renamed: newName !== oldName }
+      },
+      // JSON 卡导入(V1 裸对象 / V2 / V3)
+      cardImportJson: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        try {
+          const j = JSON.parse(String((args && args.json) || ''))
+          const d = (j && j.data && typeof j.data === 'object') ? j.data : j
+          if (!d || typeof d !== 'object') return { ok: false, message: 'JSON 里没有角色数据。' }
+          const r = await importCardData(d, { overwrite: !!(args && args.overwrite), saveAsName: args && args.saveAsName, artBase64: args && args.artBase64 })
+          if (!r.ok && r.duplicate) return { ok: false, duplicate: true, name: r.name, message: '卡库里已有同名角色「' + r.name + '」，要覆盖还是另存为？' }
+          return { ok: r.ok, name: r.name, lore: r.lore, loreSkipped: r.loreSkipped, savedCard: r.savedCard, message: '已导入角色「' + r.name + '」' + (state.character && state.character.greeting ? '，开场白：「' + expandStMacros(state.character.greeting).slice(0, 60) + '」' : '') + (r.lore ? '，世界观 ' + r.lore + ' 条' + (r.loreSkipped ? '（跳过重复 ' + r.loreSkipped + ' 条）' : '') : '') + '，已存入卡库。' }
+        } catch (e) {
+          return { ok: false, message: 'JSON 卡解析失败：' + String((e && e.message) || e) }
         }
       },
       // ST 预设: list/import/remove/setEnabled(外部预设默认关+风险提示, 启用才注入)
       presetList: async (args) => {
         adoptAgent(args)
         await ensureLoaded()
-        return (state.presets || []).map((p) => ({ id: p.id, name: p.name, enabled: !!p.enabled, prompt: String(p.prompt || '').slice(0, 80), postHistory: String(p.postHistoryInstructions || '').slice(0, 40) }))
+        return (state.presets || []).map((p) => ({ id: p.id, name: p.name, enabled: !!p.enabled, prompt: String(p.prompt || '').slice(0, 80), postHistory: String(p.postHistoryInstructions || '').slice(0, 40), items: presetItemCount(p) }))
+      },
+      // ST 预设条目化(逐条启停): 提示词在 raw.prompts[] 里, marker 为占位符
+      presetItems: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const p = (state.presets || []).find((x) => x.id === id)
+        if (!p) return { ok: false, message: '预设不存在。' }
+        return { ok: true, id, name: p.name, items: presetEntryList(p) }
+      },
+      presetSetItem: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const idx = Number(args && args.index)
+        const on = !!(args && args.enabled)
+        const p = (state.presets || []).find((x) => x.id === id)
+        if (!p) return { ok: false, message: '预设不存在。' }
+        const list = presetEntryList(p)
+        if (!list.some((x) => x.index === idx)) return { ok: false, message: '条目不存在。' }
+        if (!state.presetItems) state.presetItems = {}
+        const map = state.presetItems[id] = state.presetItems[id] || {}
+        map[String(idx)] = on
+        await saveState()
+        return { ok: true, id, index: idx, enabled: on, items: presetEntryList(p) }
       },
       presetImport: async (args) => {
         adoptAgent(args)
@@ -3271,7 +3569,7 @@ export function apply(ctx, config) {
             if (!p || typeof p !== 'object') continue
             const ex = extractStPreset(p)
             const nm = String(p.name || p.preset_name || fileName || '未命名预设').slice(0, 60)
-            state.presets.push({ id: 'preset-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6), name: nm, raw, prompt: ex.prompt, postHistoryInstructions: ex.post, enabled: false })
+            state.presets.push({ id: 'preset-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6), name: nm, raw, prompt: ex.prompt, postHistoryInstructions: ex.post, prompts: Array.isArray(p.prompts) ? JSON.parse(JSON.stringify(p.prompts)) : null, enabled: false })
             imported++
           }
           if (state.presets.length > 10) state.presets.splice(0, state.presets.length - 10)
@@ -3306,7 +3604,7 @@ export function apply(ctx, config) {
       loreList: async (args) => {
         adoptAgent(args)
         await ensureLoaded()
-        return (memory.worldbook || []).map((e) => ({ id: e.id, keywords: Array.isArray(e.keywords) ? e.keywords : [], constant: !!e.constant, priority: e.priority || 0, enabled: e.enabled !== false, content: String(e.content || '').slice(0, 140) }))
+        return (memory.worldbook || []).map((e) => ({ id: e.id, keywords: Array.isArray(e.keywords) ? e.keywords : [], constant: !!e.constant, priority: e.priority || 0, enabled: e.enabled !== false, fromCard: e.fromCard || null, content: String(e.content || '').slice(0, 140) }))
       },
       loreImport: async (args) => {
         adoptAgent(args)
@@ -3316,17 +3614,18 @@ export function apply(ctx, config) {
           const list = normalizeLoreList(j)
           if (!list.length) return { ok: false, message: '世界书文件里没有条目。' }
           memory.worldbook = memory.worldbook || []
-          let imported = 0
+          let imported = 0, skipped = 0
           for (const raw of list) {
             const e = normalizeStLoreEntry(raw)
             if (!e) continue
+            if (findDuplicateLore(e)) { skipped++; continue }   // 去重: 重复导入不再累积(实测曾 4→8→13 条)
             memory.worldbook.push({ id: makeLoreId(), ...e })
             imported++
           }
           if (memory.worldbook.length > 300) memory.worldbook.splice(0, memory.worldbook.length - 300)
           await saveState()
           const consts = memory.worldbook.filter((x) => x.constant).length
-          return { ok: true, imported, message: '已导入 ' + imported + ' 条世界书' + (consts ? '(含常驻 ' + consts + ' 条)' : '') + '。' }
+          return { ok: true, imported, skipped, message: '已导入 ' + imported + ' 条世界书' + (skipped ? '(跳过重复 ' + skipped + ' 条)' : '') + (consts ? '(含常驻 ' + consts + ' 条)' : '') + '。' }
         } catch (e) {
           return { ok: false, message: '世界书解析失败：' + String((e && e.message) || e) }
         }
@@ -3339,6 +3638,38 @@ export function apply(ctx, config) {
         memory.worldbook = (memory.worldbook || []).filter((e) => e.id !== id)
         await saveState()
         return { ok: true, removed: before - memory.worldbook.length }
+      },
+      // 世界书条目编辑(侧栏): 启停/内容/关键词/优先级/常驻
+      loreUpdate: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const id = String((args && args.id) || '')
+        const e = (memory.worldbook || []).find((x) => x.id === id)
+        if (!e) return { ok: false, message: '条目不存在。' }
+        const f = (args && args.fields) || {}
+        if (typeof f.content === 'string') e.content = f.content.slice(0, 4000)
+        if (typeof f.enabled === 'boolean') e.enabled = f.enabled
+        if (typeof f.constant === 'boolean') e.constant = f.constant
+        if (f.priority !== undefined) e.priority = Number(f.priority) || 0
+        if (Array.isArray(f.keywords)) e.keywords = f.keywords.map((x) => String(x).trim()).filter(Boolean).slice(0, 20)
+        else if (typeof f.keywords === 'string') e.keywords = f.keywords.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean).slice(0, 20)
+        if (!e.content) return { ok: false, message: '内容不能为空。' }
+        await saveState()
+        return { ok: true, entry: { id: e.id, keywords: e.keywords, content: e.content.slice(0, 140), constant: !!e.constant, enabled: e.enabled !== false, priority: e.priority || 0 } }
+      },
+      loreAdd: async (args) => {
+        adoptAgent(args)
+        await ensureLoaded()
+        const content = String((args && args.content) || '').trim()
+        if (!content) return { ok: false, message: '内容不能为空。' }
+        const kw = Array.isArray(args.keywords) ? args.keywords : String((args && args.keywords) || '').split(/[,，\n]/)
+        const entry = { id: makeLoreId(), keywords: kw.map((x) => String(x).trim()).filter(Boolean).slice(0, 20), content: content.slice(0, 4000), priority: Number(args && args.priority) || 0, enabled: true, constant: !!(args && args.constant) }
+        if (!entry.constant && !entry.keywords.length) return { ok: false, message: '要么给关键词，要么设为常驻。' }
+        if (findDuplicateLore(entry)) return { ok: false, message: '内容相同的条目已存在。' }
+        memory.worldbook = memory.worldbook || []
+        memory.worldbook.push(entry)
+        await saveState()
+        return { ok: true, id: entry.id, total: memory.worldbook.length }
       },
       // 她眼里的你(祛魅): AI 维护画像, 侧栏可见
       portraitList: async (args) => {
@@ -3572,6 +3903,7 @@ export function apply(ctx, config) {
         if (idx === -1) return { ok: false, message: '没有找到角色卡。' }
         const removed = cards.splice(idx, 1)[0]
         await writeCards(cards)
+        await removeArt(removed.name)          // 同时清掉原图/缩略图 sidecar
         return { ok: true, removed: removed.name }
       },
     })

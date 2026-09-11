@@ -183,3 +183,124 @@ export function writeCardToPng(json, basePng) {
   }
   return Buffer.concat(out)
 }
+
+// ==================== 缩略图: 零依赖 PNG 解码 / 缩放 / 编码 ====================
+// 用途: 卡库画廊要显示头像。原图 400x600 / 539KB 太大, 生成 128px 缩略图(~10KB 文本 base64)。
+// 只支持最常见形态(8bit、非交错、灰/RGB/灰+alpha/RGBA), 其余一律返回 null 由上层回退字母头像。
+
+export function pngSize(bytes) {
+  const b = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  if (!isPng(b)) return null
+  const ihdr = scanChunks(b).find((c) => c.type === 'IHDR')
+  if (!ihdr || ihdr.data.length < 13) return null
+  return { width: ihdr.data.readUInt32BE(0), height: ihdr.data.readUInt32BE(4), bitDepth: ihdr.data[8], colorType: ihdr.data[9], interlace: ihdr.data[12] }
+}
+
+const CHANNELS = { 0: 1, 2: 3, 4: 2, 6: 4 }
+
+// 解码为 RGBA(Uint8Array, 宽*高*4)。不支持/损坏 → null
+export function decodePng(bytes) {
+  const b = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  const head = pngSize(b)
+  if (!head) return null
+  const { width: w, height: h, bitDepth, colorType, interlace } = head
+  if (bitDepth !== 8 || interlace !== 0 || !CHANNELS[colorType]) return null
+  if (!w || !h || w * h > 40 * 1000 * 1000) return null
+  const ch = CHANNELS[colorType]
+  const idat = []
+  for (const c of scanChunks(b)) if (c.type === 'IDAT') idat.push(c.data)
+  if (!idat.length) return null
+  let raw = null
+  try { raw = zlib.inflateSync(Buffer.concat(idat)) } catch (e) { return null }
+  const stride = w * ch
+  if (raw.length < (stride + 1) * h) return null
+  const out = Buffer.alloc(w * h * 4)
+  const prev = Buffer.alloc(stride)
+  const cur = Buffer.alloc(stride)
+  let p = 0
+  for (let y = 0; y < h; y++) {
+    const ft = raw[p++]
+    raw.copy(cur, 0, p, p + stride)
+    p += stride
+    // 五种滤镜重建(Paeth 等与 PNG 规范一致)
+    for (let i = 0; i < stride; i++) {
+      const a = i >= ch ? cur[i - ch] : 0
+      const bb = prev[i]
+      const c = i >= ch ? prev[i - ch] : 0
+      let add = 0
+      if (ft === 1) add = a
+      else if (ft === 2) add = bb
+      else if (ft === 3) add = (a + bb) >> 1
+      else if (ft === 4) {
+        const pp = a + bb - c
+        const pa = Math.abs(pp - a), pb = Math.abs(pp - bb), pc = Math.abs(pp - c)
+        add = (pa <= pb && pa <= pc) ? a : (pb <= pc ? bb : c)
+      } else if (ft !== 0) return null
+      cur[i] = (cur[i] + add) & 0xff
+    }
+    for (let x = 0; x < w; x++) {
+      const si = x * ch
+      const di = (y * w + x) * 4
+      if (colorType === 0) { out[di] = out[di + 1] = out[di + 2] = cur[si]; out[di + 3] = 255 }
+      else if (colorType === 4) { out[di] = out[di + 1] = out[di + 2] = cur[si]; out[di + 3] = cur[si + 1] }
+      else if (colorType === 2) { out[di] = cur[si]; out[di + 1] = cur[si + 1]; out[di + 2] = cur[si + 2]; out[di + 3] = 255 }
+      else { out[di] = cur[si]; out[di + 1] = cur[si + 1]; out[di + 2] = cur[si + 2]; out[di + 3] = cur[si + 3] }
+    }
+    cur.copy(prev)
+  }
+  return { width: w, height: h, rgba: out }
+}
+
+// 面积平均缩放(比最近邻干净; 头像足够)。maxEdge = 长边上限
+export function downscaleRgba(img, maxEdge = 128) {
+  if (!img || !img.rgba) return null
+  const { width: sw, height: sh, rgba: src } = img
+  const scale = Math.min(1, maxEdge / Math.max(sw, sh))
+  if (scale >= 1) return { width: sw, height: sh, rgba: Buffer.from(src) }
+  const dw = Math.max(1, Math.round(sw * scale))
+  const dh = Math.max(1, Math.round(sh * scale))
+  const dst = Buffer.alloc(dw * dh * 4)
+  const xMap = new Array(dw), yMap = new Array(dh)
+  for (let x = 0; x < dw; x++) xMap[x] = [Math.floor(x * sw / dw), Math.max(Math.floor((x + 1) * sw / dw), Math.floor(x * sw / dw) + 1)]
+  for (let y = 0; y < dh; y++) yMap[y] = [Math.floor(y * sh / dh), Math.max(Math.floor((y + 1) * sh / dh), Math.floor(y * sh / dh) + 1)]
+  for (let y = 0; y < dh; y++) {
+    for (let x = 0; x < dw; x++) {
+      const [x0, x1] = xMap[x], [y0, y1] = yMap[y]
+      let r = 0, g = 0, b = 0, a = 0, n = 0
+      for (let sy = y0; sy < y1; sy++) {
+        for (let sx = x0; sx < x1; sx++) {
+          const si = (sy * sw + sx) * 4
+          r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3]; n++
+        }
+      }
+      const di = (y * dw + x) * 4
+      dst[di] = Math.round(r / n); dst[di + 1] = Math.round(g / n); dst[di + 2] = Math.round(b / n); dst[di + 3] = Math.round(a / n)
+    }
+  }
+  return { width: dw, height: dh, rgba: dst }
+}
+
+// RGBA → PNG(8bit, colorType 6, filter 0)
+export function encodePng(img) {
+  if (!img || !img.rgba) return null
+  const { width: w, height: h, rgba } = img
+  const stride = w * 4
+  const raw = Buffer.alloc((stride + 1) * h)
+  for (let y = 0; y < h; y++) {
+    raw[y * (stride + 1)] = 0
+    rgba.copy(raw, y * (stride + 1) + 1, y * stride, y * stride + stride)
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4)
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0
+  return Buffer.concat([PNG_SIG, makeChunk('IHDR', ihdr), makeChunk('IDAT', zlib.deflateSync(raw)), makeChunk('IEND', Buffer.alloc(0))])
+}
+
+// 便捷: 原图 bytes → 缩略图 bytes(任一环节不支持则 null)
+export function makeThumbnail(bytes, maxEdge = 128) {
+  const dec = decodePng(bytes)
+  if (!dec) return null
+  const small = downscaleRgba(dec, maxEdge)
+  if (!small) return null
+  return encodePng(small)
+}
