@@ -2,6 +2,41 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.5.24] - 心跳修复: 定时器路径自认领会话（此前挂机时心跳等于完全没开）
+> 起因: 用户实例实测 `hbDiag = { ticks: 62, fired: 4, woken: 0, injected: 0 }` —— 时间在走、槽位在烧、
+> 角色一句话都不说。定位到三个独立缺陷，全部修复并补单测(T47)。
+
+- **心跳引擎挂载时拿不到自己的会话（根因）**: preset 由 `isolate` realm 挂载，`apply` 与 `ctx.interval`
+  回调里 `agents.currentInitiator()` **恒为 undefined**（定时器没有发起者边界）；而 `selfAgent` 此前只能由
+  桥接 RPC(`get-state`/`peek`/`chat-poll`)或 `agent/pre-step` 设置。于是刚挂载、还没人点侧栏的实例
+  `selfAgent=null` → `ensureLoaded()` 直接 return → `stateLoaded` 永远 false → **每 60s 的 tick 在第一个
+  gate 静默 return**：ticks 一直涨、fired/woken 长期为 0。新增 `bindSelfAgent()`：按
+  `agentPresets.serviceFor(agent,'roleplay') === 本实例发布的服务对象` 自识别会话（退化到"唯一根会话"），
+  心跳 tick 与 `wakeHeartbeat` 都会先自行认领 —— **零桥接流量也能正常心跳**。
+- **死句柄永久卡死（用户实例 `fired=5 / woken=0 / injected=0` 的直接原因）**: `selfAgent` 指向已关闭/被
+  替换的会话时，`agent.steer()` 内部会走到 `agents.withInitiator()`，而它在发起者作用域已销毁时**抛
+  `agent initiator scope is disposed`**（dsh-agent `initiators`）；旧代码只 `console.error` 一句就完事，
+  句柄不清理 → 此后每次心跳都在同一处失败，`fired` 一直涨、角色永远不说话。现在：
+  ① `liveAgent()` 每次用 `agents.get(id)` 校验并换到注册表里的当前句柄；
+  ② `steer` 失败时丢弃该句柄，下一次心跳/桥接调用重新认领（单测覆盖"句柄重生后自动恢复"）；
+  ③ 失败原因写进 `hbDiag.lastWakeError`，侧栏 `get-state` 直接可见。
+- **没有会话时白烧槽位**: 原来即使无处投递也会 `fired++` 并写 `lastHb`，把这次心跳永久烧掉。现在改为
+  **本 tick 跳过且不消耗槽位**（记入 `noAgent`），用户回来/会话恢复后同一槽位照常补上这次心跳。
+- **多实例重复心跳**: deskpet 与预设各挂一份实例，各自内存里的 `lastHb` 会分叉 → 同一槽位被两个实例各触发
+  一次（实测漏出 21:13/21:26/21:37 这种非整点半点的重复心跳，角色连着说话）。现在触发前**以文件里的
+  `lastHb` 为共同节拍**（文件已记本槽位就不再重复），重复计入 `hbDiag.deduped`。
+- **不安全兜底": 唯一根会话"**: 认领失败时曾回退到「进程里只有一个根会话就用它」——实测把心跳绑到过
+  **standard 预设的会话**（会把角色的话投进无关会话）。已删除，改为严格判据：该会话的 `roleplay` 服务就是
+  本实例发布的（同引用），或该会话与本实例**同预设**（`agentPresets.composedPreset`，与 deskpet 同口径）。
+- **失败不再静默**: `hbDiag` 新增 `wakeFails`/`lastWakeError`/`binds`/`noAgent`/`deduped`/`self`/`lastBindWhy`
+  （`get-state` 可直接看），定时器回调里的 rejection 也显式接住打日志（此前是 unhandled，什么都不显示）。
+- 单测补 **T47 心跳自认领**（假时钟 + 假 agents/agentPresets 注册表）：定时器路径自认领、到点触发、唤醒、
+  pre-step 注入、死句柄记录与重生恢复、无会话不烧槽位、无关会话不误绑、多实例去重 —— 全套 419 项通过。
+
+**真实验收（测试实例 3099，1.5.24）**: 会话里出现整点/半点的心跳注入
+`(插件)【心跳】现在是 21:00…`，角色分别回话或调用 `roleplay_silent` 静默；`hbDiag` =
+`fired/woken/injected` 三者一致（此前是 `fired>0 而 woken=0/injected=0`）。
+
 ## [1.5.23] - ST 体验补齐(P0/P1): 原图保留 + 无损导出 + 卡库画廊 + 世界书编辑 + JSON/拖拽导入 + 预设条目 + 上下文面板
 > 起因: 上一轮真实验收暴露"能玩起来但体验落后 ST"——卡库只有下拉框、导出是白占位图、世界书只能删、
 > 预设只能整体开关。本轮补齐**使用者高频**的那部分(ST 那套庞大的"卡片创作者工作流"不做)。

@@ -105,11 +105,12 @@ console.log('\nT0b PS 语法门 (pet/*.ps1)');
   ok(psBad === 0, psBad === 0 ? 'PS 脚本全部通过(' + psChecked + '/' + psFiles.length + ')' : psBad + ' 个 PS 脚本语法错误');
 }
 // 一次全新引擎实例 + 独立临时数据根（reuseRoot 传入时复用同一数据根，用于跨实例断言）
-async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reuseRoot = null) {
+// opts.agents 覆盖 agents 服务(测心跳自认领时用)；opts.services 供 ctx.get(如 agentPresets)
+async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reuseRoot = null, opts = null) {
   const root = reuseRoot || mkdtempSync(join(tmpdir(), 'rp-test-'));
   if (!reuseRoot) mkdirSync(join(root, dataRoot), { recursive: true });
   if (seedChar) writeFileSync(join(root, dataRoot, 'character.json'), JSON.stringify(seedChar));
-  const captured = { tools: {}, svc: null, sections: [], events: {}, sent: [] };
+  const captured = { tools: {}, svc: null, sections: [], events: {}, sent: [], intervals: [] };
   const fake = { id: 't-session', session: { events: [], seq: 0 } };
   fake.send = function (message) {
     captured.sent.push(message);
@@ -141,14 +142,16 @@ async function boot(style = 'love', seedChar = null, dataRoot = '.roleplay', reu
     async exists(p) { return existsSync(p); },
   };
   const ctx = {
-    get: () => undefined,
+    get: (n) => ((opts && opts.services) ? opts.services[n] : undefined),
     on: (ev, h) => { (captured.events[ev] ||= []).push(h); },
     setTimeout: () => 0,
-    interval: () => 0,
+    interval: (cb, ms) => { captured.intervals.push({ cb, ms }); return 0; },
     provide: (n, s) => { if (n === 'roleplay') captured.svc = s; },
     tools: { register: (e) => { captured.tools[e.name] = e; } },
     systemPrompt: { section: (s) => { captured.sections.push(s); } },
-    agents: { currentInitiator: () => fake, get: () => fake, roots: () => [fake] },
+    // 真实运行里 preset 由 isolate realm 挂载且定时器回调没有发起者边界：
+    // opts.agents 用来复现「currentInitiator()=undefined + 注册表里多个会话」这种现场。
+    agents: Object.assign({ currentInitiator: () => fake, get: () => fake, roots: () => [fake] }, (opts && opts.agents) || {}),
     fs: fsx,
     subprocess: {},
     sandboxPolicy: { workspaceRoot: root },
@@ -1590,6 +1593,131 @@ console.log('\nT46 卡库与原图(P0/P1)');
   const bk = await b.svc.backupNow({ sessionId: 't-session' })
   ok(bk && bk.ok === true && bk.count >= 3, 'backupNow 在含 art/thumb 时仍成功(' + (bk && bk.count) + ' 文件)')
   rmSync(b.root, { recursive: true, force: true });
+}
+
+// ─── T47 心跳自认领: 定时器路径没有发起者边界, 也必须能唤醒会话 (v1.5.24) ───
+// 背景(实测): engine 在 isolate realm 挂载, ctx.interval 回调里 agents.currentInitiator()
+// 恒为 undefined, 而 selfAgent 此前只能靠桥接 RPC / pre-step 设置 →
+// 刚挂载的实例 selfAgent=null → ensureLoaded() 直接 return → stateLoaded 永远 false →
+// 每 60s 的 tick 在第一个 gate 静默返回: ticks 一直涨, fired/woken 长期为 0(心跳等于没开)。
+console.log('\nT47 心跳自认领');
+{
+  const RealDate = Date;
+  let nowMs = new RealDate('2026-09-11T21:30:20').getTime();   // 21:30 → 槽位 042, 在 06:00-23:59 内
+  class FakeDate extends RealDate {
+    constructor(...a) { if (a.length === 0) super(nowMs); else super(...a); }
+    static now() { return nowMs; }
+  }
+  globalThis.Date = FakeDate;
+  try {
+    const steered = [];
+    const other = { id: 'session-other', status: 'idle', steer: () => { throw new Error('不该唤醒别的会话') } };
+    const live = { id: 'session-live', status: 'idle', steer: (m) => steered.push(m) };
+    const registry = new Map([['session-other', other], ['session-live', live]]);
+    let b = null;
+    const services = {
+      agentPresets: { serviceFor: (a, svc) => (svc === 'roleplay' && a && a.id === 'session-live' && b ? b.captured.svc : undefined) },
+    };
+    const opts = {
+      services,
+      agents: {
+        currentInitiator: () => undefined,          // 定时器回调的真实语义
+        get: (id) => registry.get(String(id)),
+        list: () => [...registry.values()],
+        roots: () => [...registry.values()],        // 两个活跃会话 → 不能靠"唯一根"兜底
+      },
+    };
+    const seed = { enabled: true, character: { name: '心跳甲', persona: 'p' }, lastHb: '2026-09-10-001', settings: { heartbeatMinutes: 30 } };
+    b = await boot('love', seed, '.roleplay', null, opts);
+    const hb = b.captured.intervals.find((x) => x.ms === 60000);
+    ok(!!hb, '捕获 60s 心跳定时器');
+    ok(b.gs && typeof b.gs === 'function', '准备就绪');
+
+    // 1) 定时器触发: 自行认领会话 → 加载状态 → 到点触发 → 成功唤醒
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    let st = await b.svc.getState({});              // 不带 sessionId: 不借助桥接认领
+    ok(st.hbDiag.binds >= 1, '定时器路径自行认领会话(binds=' + st.hbDiag.binds + ')');
+    ok(st.hbDiag.self === 'session-live', '认领到本实例服务的会话(' + st.hbDiag.self + ')');
+    ok(st.hbDiag.fired === 1, '心跳到点触发(fired=1)');
+    ok(st.hbDiag.woken === 1 && steered.length === 1, '心跳成功唤醒会话(woken=1)');
+    ok(st.enabled === true && st.character && st.character.name === '心跳甲', '无桥接调用也已加载状态');
+    ok(st.hbDiag.wakeFails === 0, '无失败计数');
+
+    // 2) 注入: 排队的闹钟消息由 pre-step 交给回合
+    const h = (b.captured.events['agent/pre-step'] || [])[0];
+    const msg = { id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } };
+    const r1 = await h({ agent: { id: 'session-live' }, turn: 1, step: 1, signal: new AbortController().signal, messages: [msg] }, async () => ({ kind: 'enter', messages: [msg] }));
+    const injected = (r1 && r1.messages) || [];
+    ok(injected.some((m) => m.id && m.id.startsWith('rp-ctx-') && String((m.content[0] || {}).text || '').includes('【心跳】')), '心跳消息被注入回合');
+    const st2 = await b.svc.getState({});
+    ok(st2.hbDiag.injected === 1, '注入计数 +1');
+
+    // 3) 死句柄: steer 抛错不再静默 —— 记 wakeFails/lastWakeError 并丢弃句柄
+    nowMs += 30 * 60 * 1000;                        // 进入下一个心跳槽
+    live.steer = () => { throw new Error('agent-disposed') };
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    const st3 = await b.svc.getState({});
+    ok(st3.hbDiag.fired === 2, '第二个槽位照常触发(fired=2)');
+    ok(st3.hbDiag.woken === 1, '唤醒失败不虚增 woken');
+    ok(st3.hbDiag.wakeFails === 1 && String(st3.hbDiag.lastWakeError).includes('agent-disposed'), '失败原因可见(lastWakeError)');
+
+    // 4) 句柄重生: 注册表换成新对象(同 id) → 下一次心跳重新取到新句柄并恢复唤醒
+    const reborn = { id: 'session-live', status: 'idle', steer: (m) => steered.push(m) };
+    registry.set('session-live', reborn);
+    nowMs += 30 * 60 * 1000;
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    const st4 = await b.svc.getState({});
+    ok(st4.hbDiag.woken === 2 && steered.length === 2, '死句柄被替换后心跳恢复(woken=2)');
+    ok(st4.hbDiag.fired === 3, '第三个槽位照常触发(fired=3)');
+
+    // 5) 没有可用会话时: 本 tick 跳过且不消耗槽位 → 会话回来则同一个槽位照常触发
+    registry.clear();
+    nowMs += 30 * 60 * 1000;
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    const st5 = await b.svc.getState({});
+    ok(st5.hbDiag.fired === 3 && st5.hbDiag.woken === 2, '无会话时不触发(fired 不虚增)');
+    ok(st5.hbDiag.noAgent >= 1, '无会话的 tick 记入 noAgent');
+    registry.set('session-live', { id: 'session-live', status: 'idle', steer: (m) => steered.push(m) });
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    const st6 = await b.svc.getState({});
+    ok(st6.hbDiag.fired === 4 && st6.hbDiag.woken === 3, '会话回来后同一槽位仍会补上这次心跳(槽位未被烧掉)');
+
+    // 6) 绝不能误绑无关会话: 进程里只有一个「别的预设」的会话在跑时必须保持沉默
+    //    (实测踩过: 靠"唯一根会话"猜 → 把心跳投进 standard 预设的会话)
+    const stray = { id: 'session-stray', status: 'idle', steer: () => { throw new Error('误绑无关会话!') } };
+    registry.clear();
+    registry.set('session-stray', stray);
+    nowMs += 30 * 60 * 1000;
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    const st7 = await b.svc.getState({});
+    ok(st7.hbDiag.fired === 4, '无关会话在跑时不触发心跳(不消耗槽位)');
+    ok(st7.hbDiag.woken === 3, '无关会话绝不被唤醒');
+    ok(typeof st7.hbDiag.lastBindWhy === 'string', '未认领原因可见(lastBindWhy)');
+
+    // 7) 多实例去重: 文件里已记下本槽位(deskpet 那份实例刚触发过) → 本实例不再重复触发
+    //    (实测漏出过 21:13/21:26/21:37 这种非整点半点的重复心跳)
+    nowMs = new RealDate('2026-09-11T21:30:20').getTime();    // 回到槽位 043
+    const cf = join(b.root, b.dataRoot, 'character.json');
+    const curState = JSON.parse(readFileSync(cf, 'utf8'));
+    curState.lastHb = '2026-09-11-043';                        // 另一个实例写下的同一槽位
+    writeFileSync(cf, JSON.stringify(curState));
+    const beforeDedupe = steered.length;
+    hb.cb();
+    await new Promise((r) => setTimeout(r, 50));
+    const st8 = await b.svc.getState({});
+    ok(st8.hbDiag.fired === 4, '文件已记本槽位 → 本实例不重复触发(fired 不虚增)');
+    ok(st8.hbDiag.deduped >= 1, '多实例重复被计入 deduped');
+    ok(steered.length === beforeDedupe, '重复槽位不再唤醒会话');
+    rmSync(b.root, { recursive: true, force: true });
+  } finally {
+    globalThis.Date = RealDate;
+  }
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }

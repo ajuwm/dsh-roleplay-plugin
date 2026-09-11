@@ -250,7 +250,13 @@ export function apply(ctx, config) {
       discussed_topics: [], events_count: {}, worldbook: [],
       unspoken: [], reflections: [], user_portrait: { notes: [] },
     }
-    const hbDiag = { fired: 0, woken: 0, injected: 0, ticks: 0, getChecks: 0 }
+    // 心跳诊断：fired=到点触发, woken=成功唤醒会话, injected=消息真被注入回合,
+    // noAgent=本 tick 无会话可投递(不消耗槽位), wakeFails/lastWakeError=唤醒失败次数与最后原因
+    // （v1.5.24：此前失败完全静默，只能看到 fired>0/woken=0）
+    const hbDiag = { fired: 0, woken: 0, injected: 0, ticks: 0, getChecks: 0, wakeFails: 0, binds: 0, noAgent: 0, deduped: 0, self: null, lastWakeError: null, lastBindWhy: null }
+    // 本实例对外发布的 roleplay 服务对象（同引用比较用于自识别会话，见 bindSelfAgent）
+    let roleplayApi = null
+    let bindWarned = false
     const stageEvents = []
     let lastStageSeq = 0
     let stageStartSeq = 0
@@ -634,17 +640,86 @@ export function apply(ctx, config) {
         if (selfAgent && String(selfAgent.id) === sid) return true
         try {
           const a = agents.get(sid)
-          if (a) { selfAgent = a; return true }
+          if (a) { selfAgent = a; hbDiag.self = sid; return true }
         } catch (e) {}
       }
       if (selfAgent) return true
-      try { const roots = agents.roots(); if (roots.length === 1) { selfAgent = roots[0]; return true } } catch (e) {}
-      return false
+      return !!bindSelfAgent()
+    }
+
+    // 本实例自识别：找出「由本实例提供 roleplay 服务」的活跃会话。
+    // 为什么必须能自认领（v1.5.24 修）：心跳由 ctx.interval 定时触发，而定时器回调没有
+    // 发起者边界（currentInitiator()=undefined），也不保证有桥接调用。此前 selfAgent 只能
+    // 靠桥接 RPC/pre-step 设置 —— 于是刚挂载的实例 selfAgent=null → ensureLoaded() 直接返回
+    // → stateLoaded 永远 false → 每 60s 的 tick 在第一个 gate 静默 return：挂了半小时
+    // ticks 一直涨、fired/woken 全是 0，心跳等于完全没开。
+    // 本实例所在的预设 id（standing 纤纬里 ctx.agent 不存在，靠 agentPresets 反查自己）
+    let ownPreset = undefined
+    function ownPresetId() {
+      if (ownPreset !== undefined) return ownPreset
+      ownPreset = null
+      try {
+        const apSvc = typeof ctx.get === 'function' ? ctx.get('agentPresets') : undefined
+        if (apSvc && typeof apSvc.composedPreset === 'function') ownPreset = apSvc.composedPreset(ctx) || null
+      } catch (e) { ownPreset = null }
+      return ownPreset
+    }
+
+    function bindSelfAgent() {
+      if (selfAgent) return selfAgent
+      let why = ''
+      try {
+        const apSvc = typeof ctx.get === 'function' ? ctx.get('agentPresets') : undefined
+        if (!apSvc) why = 'agentPresets 不可见'
+        else if (typeof apSvc.serviceFor !== 'function') why = 'agentPresets 无 serviceFor'
+        else if (!roleplayApi) why = '本实例服务对象缺失'
+        else {
+          const mine = ownPresetId()
+          const list = (typeof agents.list === 'function' ? agents.list() : agents.roots()) || []
+          for (const a of list) {
+            if (!a || !a.id) continue
+            let svc
+            try { svc = apSvc.serviceFor(a, 'roleplay') } catch (e) { continue }
+            // 判据一：这个会话的 roleplay 服务就是本实例发布的（同引用）
+            let ok = svc !== undefined && svc === roleplayApi
+            // 判据二(兜底)：本实例所在预设的会话（deskpet 同款口径）
+            // ⚠️ 绝不能靠"唯一根会话"猜：同一个进程里可能只有别的预设的会话在跑，
+            // 猜错会把心跳消息投进无关会话（实测绑到过 standard 预设的会话）。
+            if (!ok && svc === undefined && mine) {
+              try { ok = apSvc.composedPreset(a.ctx) === mine } catch (e) { ok = false }
+            }
+            if (ok) {
+              selfAgent = a
+              hbDiag.binds++
+              hbDiag.self = String(a.id)
+              console.error('[roleplay] 心跳自认领会话: ' + String(a.id) + (svc === roleplayApi ? '(服务同一)' : '(同预设 ' + String(mine) + ')'))
+              return a
+            }
+          }
+          why = '没有活跃会话属于本实例(活跃会话 ' + list.length + ' 个' + (mine ? '，本预设 ' + mine : '') + ')'
+        }
+      } catch (e) { why = 'agentPresets 查询抛错: ' + String((e && e.message) || e) }
+      // 只第一次打印：避免每 60s 刷屏，但字段保留在 hbDiag.lastBindWhy 供侧栏/日志排查
+      hbDiag.lastBindWhy = why
+      if (!bindWarned) {
+        bindWarned = true
+        console.error('[roleplay] 心跳暂无可投递会话(' + why + ')：本次不消耗心跳槽位，会话打开后自动补上')
+      }
+      return null
     }
 
     function liveAgent() {
-      if (selfAgent) return selfAgent
-      try { return agents.currentInitiator() } catch (e) { return undefined }
+      if (selfAgent) {
+        // 会话可能已被关闭/替换：死句柄上 steer 会抛错（fired 涨、woken 永远 0）。
+        // 句柄失效就丢弃并重新认领，别永久卡在旧会话上。
+        try {
+          const cur = agents.get(String(selfAgent.id))
+          if (cur) { selfAgent = cur; return cur }
+          selfAgent = null
+        } catch (e) { return selfAgent }
+      }
+      try { const a = agents.currentInitiator(); if (a) { selfAgent = a; hbDiag.self = String(a.id); return a } } catch (e) {}
+      return bindSelfAgent() || undefined
     }
 
     // 想念系统：用户真实互动时更新 lastSeen（60s 节流写盘）+ 经济收入
@@ -1111,9 +1186,24 @@ export function apply(ctx, config) {
     }
 
     function wakeHeartbeat() {
-      const agent = liveAgent()
-      if (!agent) { console.error('roleplay: no agent to wake'); return }
-      try { agent.steer(makeUserMessage('⏱', 'hb')); hbDiag.woken++ } catch (e) { console.error('roleplay: wake failed', e) }
+      let agent = liveAgent()
+      if (!agent) agent = bindSelfAgent()   // 定时器路径：先自己认领会话（无发起者边界）
+      if (!agent) {
+        hbDiag.wakeFails++
+        hbDiag.lastWakeError = 'no-agent'
+        console.error('roleplay: no agent to wake')
+        return
+      }
+      try {
+        agent.steer(makeUserMessage('⏱', 'hb'))
+        hbDiag.woken++
+        hbDiag.lastWakeError = null
+      } catch (e) {
+        hbDiag.wakeFails++
+        hbDiag.lastWakeError = String((e && e.message) || e)
+        if (selfAgent === agent) selfAgent = null   // 死句柄：丢弃，下一次重新认领
+        console.error('roleplay: wake failed', e)
+      }
     }
 
     // 便签到期提醒: 到期且未提醒的便签 → 桌宠气泡 + 排队一条角色口吻提醒消息
@@ -1278,6 +1368,10 @@ export function apply(ctx, config) {
     }
 
     async function maybeFireHeartbeat(now) {
+      // 定时器路径既无发起者边界也无桥接调用：先自认领会话 + 加载状态，否则下面第一个
+      // gate 会静默 return（v1.5.24 前实测：ticks 一直涨，fired/woken 长期 0）。
+      if (!selfAgent) bindSelfAgent()
+      if (!stateLoaded) { try { await ensureLoaded() } catch (e) { /* 加载失败：下个 tick 再试 */ } }
       if (!stateLoaded || !state.enabled || !state.character) return
       // 便签到期提醒独立于心跳槽: 到点即写入桌宠气泡 + 排队提醒消息
       try { await checkDueNotes(now) } catch (e) { /* 提醒失败不阻塞心跳 */ }
@@ -1289,6 +1383,14 @@ export function apply(ctx, config) {
         const t = await resolveFile(REL_ROOT + '/character.json')
         const parsed = JSON.parse(await fs.readText(t))
         if (!parsed || parsed.enabled !== true) return
+        // 多实例去重（v1.5.24）：deskpet 与预设各挂一份实例，各自内存里的 lastHb 会分叉，
+        // 于是同一个槽位会被两个实例各触发一次（实测漏出 21:13/21:26/21:37 这种非整点半点的
+        // 心跳）。以文件里的 lastHb 为共同节拍：文件已记下本槽位就不再重复触发。
+        const fileHb = typeof parsed.lastHb === 'string' ? parsed.lastHb : null
+        if (fileHb && fileHb !== state.lastHb) {
+          if (fileHb === heartbeatKey(now)) hbDiag.deduped++
+          state.lastHb = fileHb
+        }
         // 取文件中最新衰减基准（多实例互斥用）
         const fsSince = parsed.stats && parsed.stats.since
         fileSinceMs = typeof fsSince === 'string' ? Date.parse(fsSince) : Number(fsSince)
@@ -1299,7 +1401,10 @@ export function apply(ctx, config) {
       const hour = now.getHours()
       if (hour < 6 || hour > 23) return
       const agent = liveAgent()
-      if (agent && agent.status === 'running') return
+      // 没有可投递的会话：本 tick 直接跳过，且**不消耗槽位**（不写 lastHb）——
+      // 否则会把这次心跳永久烧掉：用户回来时角色一句话都不会说，只会看到 fired 在涨。
+      if (!agent) { hbDiag.noAgent++; return }
+      if (agent.status === 'running') return
       state.lastHb = hk
       hbDiag.fired++
       applyStatsDecay(now, fileSinceMs)
@@ -2997,7 +3102,11 @@ export function apply(ctx, config) {
 
     // ==================== 心跳引擎 ====================
 
-    ctx.interval(() => { hbDiag.ticks++; maybeFireHeartbeat(new Date()) }, 60 * 1000)
+    ctx.interval(() => {
+      hbDiag.ticks++
+      // 定时器回调里的 rejection 此前是静默的（unhandled）：显式接住，心跳故障可见
+      Promise.resolve().then(() => maybeFireHeartbeat(new Date())).catch((e) => console.error('roleplay: heartbeat tick failed', e))
+    }, 60 * 1000)
 
     // ==================== 事件监听 ====================
 
@@ -3159,7 +3268,8 @@ export function apply(ctx, config) {
       return parts.join('\n\n')
     }
 
-    ctx.provide('roleplay', {
+    // 服务对象先存到变量：同引用比较是 bindSelfAgent 自识别会话的依据（见其注释）
+    roleplayApi = {
       getState: async (args) => {
         adoptAgent(args)
         await ensureLoaded()
@@ -3220,7 +3330,7 @@ export function apply(ctx, config) {
           },
           diaryView,
           lastTurn: lastTurnAudit,
-          hbDiag,
+          hbDiag: { ...hbDiag, self: selfAgent ? String(selfAgent.id) : null, nextLabel: nextHeartbeatLabel() },
           // 上下文可视化(P1-6): 最近一次提示词各段字符数 + 估算 token(中文约 1.6 字/token)
           promptStats: { at: promptStats.at, sections: { ...promptStats.sections }, total: promptStats.total, estTokens: Math.round(promptStats.total / 1.6) },
           hasArt: (state.character && state.character.name) ? !!(await readArt(state.character.name, 'art')) : false,
@@ -3906,7 +4016,10 @@ export function apply(ctx, config) {
         await removeArt(removed.name)          // 同时清掉原图/缩略图 sidecar
         return { ok: true, removed: removed.name }
       },
-    })
+    }
+    ctx.provide('roleplay', roleplayApi)
 
+    // 挂载时先尝试认领会话（currentInitiator 常为 undefined，真正的兜底是心跳 tick 里的 bindSelfAgent）
+    if (!selfAgent) bindSelfAgent()
     if (selfAgent) ensureLoaded()
 }
