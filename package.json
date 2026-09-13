@@ -1,7 +1,7 @@
 {
   "name": "@ajuwm/dsh-roleplay-plugin",
-  "version": "1.5.24",
-  "description": "DeepSeek Harness 角色扮演插件(恋爱向/朋友向/OC 原创向): 全局角色卡、亲密度三轴+里程碑+难度自选、养成商城、心跳想念、剧情档案、人格真实感(隐藏底线+增强)、ST生态(PNG卡/预设/世界书constant)、祛魅画像、桌宠(附加); DSH 0.1.1-rc.2 兼容。",
+  "version": "1.5.25",
+  "description": "DSH 角色扮演插件（恋爱向 / 朋友向 / OC 原创向）：角色卡库、亲密关系与里程碑、养成与背包、心跳主动消息、日记与记忆、世界书、ST 角色卡（PNG/JSON）导入导出、桌宠窗口。",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -27,8 +27,11 @@
     "dsh",
     "deepseek-harness",
     "roleplay",
-    "plugin",
-    "character"
+    "character-card",
+    "sillytavern",
+    "ai-companion",
+    "desktop-pet",
+    "plugin"
   ],
   "dsh": {
     "bundle": {
@@ -38,5 +41,20 @@
       "platform": "web"
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "ajuwm",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajuwm/dsh-roleplay-plugin.git"
+  },
+  "homepage": "https://github.com/ajuwm/dsh-roleplay-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/ajuwm/dsh-roleplay-plugin/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
