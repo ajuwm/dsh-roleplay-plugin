@@ -1,6 +1,6 @@
 {
   "name": "@ajuwm/dsh-roleplay-plugin",
-  "version": "1.5.26",
+  "version": "1.5.28",
   "description": "DSH 角色扮演插件（恋爱向 / 朋友向 / OC 原创向）：角色卡库、亲密关系与里程碑、养成与背包、心跳主动消息、日记与记忆、世界书、ST 角色卡（PNG/JSON）导入导出、桌宠窗口。",
   "type": "module",
   "main": "./lib/index.js",

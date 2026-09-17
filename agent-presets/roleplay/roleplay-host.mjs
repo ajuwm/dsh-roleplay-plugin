@@ -85,11 +85,15 @@ export function apply(ctx, config) {
       return out
     }
     let nsSynced = false
+    let settingsTouchedByUser = false   // 面板/侧栏刚改过 → 启动期的那次命名空间同步不得把它冲掉
     async function syncSettingsFromNamespace() {
       // 与 DSH「插件设置」命名空间对齐一次：
       //  - 命名空间还没配置过 → 把当前 state.settings 灌进去（种子），让面板显示真实配置；
       //  - 命名空间已有内容（面板/之前配置过）→ 以面板为准，覆盖本机 state.settings。
+      // ⚠️ 实测竞态（v1.5.27 修）：引擎刚起来时这次同步是异步的，若用户此时正好在侧栏改设置
+      // （如把叙述风格切成聊天模式），同步落地后会把它**静默改回旧值**——表现为"选了没用"。
       if (!settingsSvc || !state.settings || nsSynced) return
+      if (settingsTouchedByUser) { nsSynced = true; return }
       try {
         const nsVal = settingsSvc.get('roleplay')
         if (nsVal === undefined) return   // 命名空间未注册：留待下次
@@ -297,6 +301,8 @@ export function apply(ctx, config) {
       const v = Number(state.settings && state.settings.heartbeatMinutes)
       return (v >= 5 && v <= 240) ? v : 30
     }
+    // 叙述风格是否为「聊天模式（只有台词）」——心跳、输出契约段、每轮格式提醒都用它
+    function isChatMode() { return !!(state.settings && state.settings.narrationMode === 'chat') }
     function heartbeatKey(d) {
       const m = heartbeatMinutes()
       const slot = Math.floor((d.getHours() * 60 + d.getMinutes()) / m)
@@ -1464,7 +1470,7 @@ export function apply(ctx, config) {
       if (state.settings && state.settings.autoLook) parts.push('- 如果你此刻想看看用户的世界（他正在做什么），可以调用 roleplay_look_desktop 看一眼桌面再回应。')
       parts.push('- 先在心里安静地想一次（不必说出来）：此刻有没有想做的事？有没有想对用户说的话？有没有想为对方做点什么（关心、准备、约定、分享、或者一件悄悄准备的小事）？')
       parts.push('- 回顾最近几轮对话里你说过的话：如果已经向用户提出过某个邀约或约定（比如约好去哪里、做什么、看什么），这次不要再重复提出同样的话——可以轻轻问一句对方的回应，或安静等待；只有确实有新的事情，才值得再次主动开口。')
-      const chatMode = !!(state.settings && state.settings.narrationMode === 'chat')
+      const chatMode = isChatMode()
       parts.push(chatMode
         ? '- 想清楚之后：如果有值得开口的事，只发一句台词就够（当前是聊天模式：不要动作/神态/场景描写，不要旁白，像随手发来的一条消息）；如果只是寻常的一天、没有特别想说的，调用 roleplay_silent 静默结束，并把刚才心里想过、但没说出口的念头放进 thought 参数（比如「想提醒他早点睡」「想约他下次一起看星星」），以后在合适的对话里自然提起。'
         : '- 想清楚之后：如果有值得开口的事，以角色口吻给用户发一条简短的消息（直接输出即可）；如果只是寻常的一天、没有特别想说的，调用 roleplay_silent 静默结束，并把刚才心里想过、但没说出口的念头放进 thought 参数（比如「想提醒他早点睡」「想约他下次一起看星星」），以后在合适的对话里自然提起。')
@@ -3117,6 +3123,27 @@ export function apply(ctx, config) {
           return lines.join('\n')
         },
       })
+
+      // 聊天模式·输出契约：放在最后 (order 990) —— 最近的指令最管用。
+      // 为什么需要单独一段：聊天模式要求"只有台词"，但会话历史里积压着大量旧模式写法的
+      // （动作）/「场景」/内心独白，模型会照着历史排版仿写（实测：规则在角色段里也没能压住）。
+      // 这一段用最精简、最靠后的形式复述输出契约，并明确"历史排版不算要求"。
+      addSection({
+        name: 'roleplay.chat-contract',
+        order: 990,
+        text: () => {
+          if (!stateLoaded || !state.enabled || !state.character) return ''
+          if (!(state.settings && state.settings.narrationMode === 'chat')) return ''
+          return [
+            '【本轮输出格式 · 聊天模式（最高优先级，与上文任何段落冲突时以本节为准）】',
+            '只写她说的话，一个字都不多。像在聊天软件里回一条消息。',
+            '- 不要（……）或「……」式的动作、神态、心理、场景、旁白——**历史消息里那种写法是被旧模式要求的，本轮不要模仿**。',
+            '- 不写时间/地点/天气/氛围，不写「' + state.character.name + '：」这类前缀，不加引号。',
+            '- 1 句为主，最多 2 句；「嗯。」「在的。」「怎么了。」就是完整回复；不想接话就只发「……」。',
+            '- 合格示例（整轮就这么长）：在。 / 你怎么了？ / 不想说就先别说。 / ……',
+          ].join('\n')
+        },
+      })
     }
 
     // ==================== 心跳引擎 ====================
@@ -3151,7 +3178,22 @@ export function apply(ctx, config) {
         const userReal = messages.some((m) => m && m.role === 'user' && m.content && !(m.id && String(m.id).startsWith('rp-')) && !(m.source && m.source.kind === 'plugin'))
         if (userReal) { touchSeen(); maybeEarnCoins() }
         lastTurnStart = lastTurnStart || Date.now()
-        const kept = messages.filter((m) => !(m && m.id && String(m.id).startsWith('rp-hb-')))
+        let kept = messages.filter((m) => !(m && m.id && String(m.id).startsWith('rp-hb-')))
+        // 聊天模式：末尾压一句格式提醒（hidden，界面不显示）。
+        // 为什么必须放在末尾：模型看得到整段会话历史，而历史里全是旧模式的（动作）/场景写法；
+        // 段落里的禁令（哪怕在最末尾的段落）也容易被历史排版带跑——实测 7000+ 条历史的会话里
+        // 仍然照写（动作）。紧贴本轮的最后一条指令是最有效的纠偏位置。
+        if (isChatMode() && state.enabled && state.character && (messages.length || pendingHeartbeats.length)) {
+          try {
+            kept.push({
+              id: 'rp-fmt-' + Date.now().toString(36),
+              role: 'user',
+              content: [{ type: 'text', text: '【本轮格式】只回她的台词，不要（动作）/神态/场景/旁白，不要引号，1 句为主。例：在。/ 你怎么了？/ ……' }],
+              source: { kind: 'plugin', plugin: 'roleplay' },
+              hidden: true,
+            })
+          } catch (e) { /* 提醒失败不能影响本轮 */ }
+        }
         if (pendingHeartbeats.length === 0) {
           return kept.length === messages.length ? decision : { kind: 'enter', messages: kept }
         }
@@ -3971,6 +4013,7 @@ export function apply(ctx, config) {
       updateSettings: async (args) => {
         adoptAgent(args)
         await ensureLoaded()
+        settingsTouchedByUser = true   // 用户显式改过 → 防止启动期的命名空间同步回退(见 syncSettingsFromNamespace)
         const s = (args && args.settings) ? args.settings : {}
         if (!state.settings) state.settings = { ...DEFAULT_SETTINGS }
         if (s.heartbeatMinutes !== undefined) {

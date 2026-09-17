@@ -25,7 +25,10 @@ function extractText(ev) {
   // 被当成"用户说的话"整段显示在侧栏里。
   const scaffoldKind = kind !== null && kind !== 'user' && kind !== 'model' && kind !== 'assistant'
   const scaffoldText = /^\s*(<system-reminder>|Current runtime context\.)/i.test(text)
-  const hidden = !rpTagged && (scaffoldKind || scaffoldText)
+  // 显式 hidden（引擎自己注入的隐藏消息，例如聊天模式的"每轮格式提醒"）：
+  // DSH 主对话不显示它，侧栏也必须不显示——实测漏掉时每轮会多出一行「【本轮格式】…」。
+  const flaggedHidden = m.hidden === true || raw.hidden === true
+  const hidden = flaggedHidden || (!rpTagged && (scaffoldKind || scaffoldText))
   return { text, id, plugin, hidden }
 }
 

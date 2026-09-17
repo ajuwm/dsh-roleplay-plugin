@@ -1736,6 +1736,17 @@ console.log('\nT48 聊天模式(只有台词)');
   ok(st.settings && st.settings.narrationMode === 'chat', 'chat 模式已落进 settings');
 
   const t1 = String(await b.promptText());
+  // 输出契约是独立段落(order 990, 排在所有段落之后) —— 单独取它的文本断言
+  const contractOf = (bb) => {
+    const sec = (bb.captured.sections || []).find((s) => s.name === 'roleplay.chat-contract')
+    return sec ? String(sec.text()) : ''
+  };
+  const ct1 = contractOf(b);
+  ok(ct1.includes('聊天模式（最高优先级'), '末尾有一段最高优先级的输出契约(压住历史排版的模仿)');
+  ok(ct1.includes('历史消息里那种写法是被旧模式要求的'), '契约里明确「历史排版不代表本轮要求」');
+  ok(ct1.includes('合格示例'), '契约给了合格示例(正面模板比只写禁令更管用)');
+  const csec = (b.captured.sections || []).find((s) => s.name === 'roleplay.chat-contract');
+  ok(csec && csec.order === 990, '契约段 order=990, 排在所有段落最后');
   ok(t1.includes('（当前：聊天模式）'), '提示词切到聊天模式');
   ok(t1.includes('只有台词'), '明确「只写她说的话」');
   ok(t1.includes('禁止动作与神态描写') && t1.includes('禁止内心独白') && t1.includes('禁止场景/环境/氛围描写'), '三条禁止都在(动作/独白/场景)');
@@ -1746,6 +1757,25 @@ console.log('\nT48 聊天模式(只有台词)');
   ok(!t1.includes('动作开场'), '开场轮换里不再有「动作开场」');
   ok(!t1.includes('台词与动作仍用中文'), '思考里也不再提动作');
 
+  // 1b) 每轮末尾的格式提醒（贴着本轮的最后一条指令，纠偏历史里旧排版最有效）
+  {
+    const h = (b.captured.events['agent/pre-step'] || [])[0];
+    const msg = { id: 'u-fmt', role: 'user', content: [{ type: 'text', text: '晚上好' }], source: { kind: 'user' } };
+    const r = await h({ agent: { id: 't-session' }, turn: 1, step: 1, signal: new AbortController().signal, messages: [msg] }, async () => ({ kind: 'enter', messages: [msg] }));
+    const all = (r && r.messages) || [];
+    const reminder = all.filter((m) => m.id && String(m.id).startsWith('rp-fmt-'));
+    ok(reminder.length === 1, '聊天模式每轮注入一条末尾格式提醒');
+    ok(reminder[0] && reminder[0].hidden === true, '提醒带 hidden（界面不显示）');
+    ok(String(reminder[0].content[0].text).includes('只回她的台词'), '提醒内容明确「只回台词」');
+    ok(all[all.length - 1].id === reminder[0].id, '提醒排在最后（离本轮最近）');
+    // 切回小说模式 → 不再注入
+    await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'novel' } });
+    const r2 = await h({ agent: { id: 't-session' }, turn: 2, step: 1, signal: new AbortController().signal, messages: [msg] }, async () => ({ kind: 'enter', messages: [msg] }));
+    const all2 = (r2 && r2.messages) || [];
+    ok(!all2.some((m) => m.id && String(m.id).startsWith('rp-fmt-')), '小说模式不注入格式提醒');
+    await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'chat' } });
+  }
+
   // 2) 脏值被拒(不会把 narrationMode 写坏)
   await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'nonsense' } });
   st = await b.gs();
@@ -1755,6 +1785,7 @@ console.log('\nT48 聊天模式(只有台词)');
   await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'novel' } });
   const t2 = String(await b.promptText());
   ok(t2.includes('（当前：小说模式）') && !t2.includes('（当前：聊天模式）'), '可切回小说模式');
+  ok(contractOf(b) === '', '非聊天模式不注入输出契约段(段落文本为空)');
   rmSync(b.root, { recursive: true, force: true });
 }
 {
@@ -1766,6 +1797,27 @@ console.log('\nT48 聊天模式(只有台词)');
     const s = readFileSync(new URL('../agent-presets/' + f + '/roleplay-host.mjs', import.meta.url), 'utf8');
     ok(s.includes("'chat'") && s.includes('（当前：聊天模式）'), f + ' 预设也支持聊天模式(下拉是共用的, 不能静默忽略)');
   }
+}
+
+// ─── T49 隐藏消息不进对话侧栏（聊天模式的"每轮格式提醒"用 hidden 标记） ───
+console.log('\nT49 隐藏消息');
+{
+  const { pickMessages, historyMessages } = await import(new URL('../agent-presets/roleplay/lib/chat-core.mjs', import.meta.url).href);
+  const mk = (seq, id, text, extra) => ({
+    seq, type: 'user/message',
+    data: { id, message: Object.assign({ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'roleplay' } }, extra || {}) },
+  });
+  const events = [
+    mk(1, 'rp-fmt-1', '【本轮格式】只回她的台词', { hidden: true }),
+    mk(2, 'rp-hb-1', '【心跳】现在是 21:00'),
+  ];
+  const p = pickMessages(events, 0, 10);
+  const fmt = p.messages.find((m) => m.id === 'rp-fmt-1');
+  const hb = p.messages.find((m) => m.id === 'rp-hb-1');
+  ok(fmt && fmt.hidden === true, '带 hidden 的注入消息被标记为 hidden（侧栏据此过滤）');
+  ok(hb && hb.hidden === false, '心跳消息仍然可见（设计上要在侧栏显示）');
+  const visible = historyMessages(events, 10).filter((m) => !m.hidden);
+  ok(visible.length === 1 && visible[0].id === 'rp-hb-1', '历史视图过滤后只剩心跳，格式提醒不出现');
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
