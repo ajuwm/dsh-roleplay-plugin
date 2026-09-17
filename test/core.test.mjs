@@ -1720,5 +1720,53 @@ console.log('\nT47 心跳自认领');
   }
 }
 
+// ─── T48 叙述风格「聊天模式」: 只有台词, 没有动作/独白/场景, 且更短 ───
+console.log('\nT48 聊天模式(只有台词)');
+{
+  const b = await boot();
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  const t0 = String(await b.promptText());
+  ok(t0.includes('（当前：小说模式）'), '默认仍是小说模式');
+  ok(t0.includes('内心独白'), '小说模式允许独白(对照用)');
+
+  // 1) 切到聊天模式
+  const up = await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'chat' } });
+  ok(up && up.ok !== false, 'updateSettings 接受 chat');
+  let st = await b.gs();
+  ok(st.settings && st.settings.narrationMode === 'chat', 'chat 模式已落进 settings');
+
+  const t1 = String(await b.promptText());
+  ok(t1.includes('（当前：聊天模式）'), '提示词切到聊天模式');
+  ok(t1.includes('只有台词'), '明确「只写她说的话」');
+  ok(t1.includes('禁止动作与神态描写') && t1.includes('禁止内心独白') && t1.includes('禁止场景/环境/氛围描写'), '三条禁止都在(动作/独白/场景)');
+  ok(!t1.includes('内心独白至多 1 句'), '小说模式那条「独白至多 1 句」不再出现');
+  ok(t1.includes('默认 1 句，最多 2 句'), '长度要求更短(1 句为主)');
+  ok(!t1.includes('每轮最多 5~6 句台词'), '不再允许 5~6 句的长回复');
+  ok(t1.includes('不要用（……）') && t1.includes('不要用动作描写代替'), '沉默只能用「……」或极短敷衍, 不得用动作代替');
+  ok(!t1.includes('动作开场'), '开场轮换里不再有「动作开场」');
+  ok(!t1.includes('台词与动作仍用中文'), '思考里也不再提动作');
+
+  // 2) 脏值被拒(不会把 narrationMode 写坏)
+  await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'nonsense' } });
+  st = await b.gs();
+  ok(st.settings.narrationMode === 'chat', '非法值被拒, 仍是 chat');
+
+  // 4) 切回小说模式 → 规则回到原样
+  await b.svc.updateSettings({ sessionId: 't-session', settings: { narrationMode: 'novel' } });
+  const t2 = String(await b.promptText());
+  ok(t2.includes('（当前：小说模式）') && !t2.includes('（当前：聊天模式）'), '可切回小说模式');
+  rmSync(b.root, { recursive: true, force: true });
+}
+{
+  // 心跳文案分叉: 直接检查引擎源码(心跳提示词是运行时按模式拼的, 单测在进程内拿不到内部数组)
+  const src = readFileSync(new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url), 'utf8');
+  ok(/narrationMode === 'chat'/.test(src), '心跳提示词按 chat 模式分叉');
+  ok(src.includes('当前是聊天模式：不要动作/神态/场景描写'), '心跳里明确「只发一句台词」');
+  for (const f of ['roleplay-friend', 'roleplay-oc']) {
+    const s = readFileSync(new URL('../agent-presets/' + f + '/roleplay-host.mjs', import.meta.url), 'utf8');
+    ok(s.includes("'chat'") && s.includes('（当前：聊天模式）'), f + ' 预设也支持聊天模式(下拉是共用的, 不能静默忽略)');
+  }
+}
+
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');

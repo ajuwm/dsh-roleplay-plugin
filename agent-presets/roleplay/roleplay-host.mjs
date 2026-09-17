@@ -51,6 +51,8 @@ export function apply(ctx, config) {
     // DSH 插件设置命名空间「roleplay」双通道同步（仅恋爱向使用；friend/oc 独立预设不共享面板设置）
     const settingsSvc = STYLE === 'love' ? ctx.get('settings') : undefined
     const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW', 'relPace', 'storyEnabled', 'summaryEnabled', 'userProfileEnabled']
+    // 叙述风格（输出规则）：novel 小说 / script 剧本 / compact 精简 / chat 聊天（只有台词）
+    const NARRATION_MODES = ['novel', 'script', 'compact', 'chat']
     function pickMigrated(obj) {
       const out = {}
       if (!obj) return out
@@ -72,7 +74,7 @@ export function apply(ctx, config) {
       if (patch.heartbeatMinutes !== undefined) { const n = Number(patch.heartbeatMinutes); if (n >= 5 && n <= 240) out.heartbeatMinutes = n }
       if (patch.shotMaxW !== undefined) out.shotMaxW = Math.max(0, Number(patch.shotMaxW) || 0)
       if (patch.autoLook !== undefined) out.autoLook = !!patch.autoLook
-      if (patch.narrationMode === 'novel' || patch.narrationMode === 'compact' || patch.narrationMode === 'script') out.narrationMode = patch.narrationMode
+      if (NARRATION_MODES.includes(patch.narrationMode)) out.narrationMode = patch.narrationMode
       if (patch.statsEnabled !== undefined) out.statsEnabled = !!patch.statsEnabled
       if (patch.difficulty === 1 || patch.difficulty === 2 || patch.difficulty === 3) out.difficulty = patch.difficulty
       if (patch.relationEnabled !== undefined) out.relationEnabled = !!patch.relationEnabled
@@ -1462,7 +1464,10 @@ export function apply(ctx, config) {
       if (state.settings && state.settings.autoLook) parts.push('- 如果你此刻想看看用户的世界（他正在做什么），可以调用 roleplay_look_desktop 看一眼桌面再回应。')
       parts.push('- 先在心里安静地想一次（不必说出来）：此刻有没有想做的事？有没有想对用户说的话？有没有想为对方做点什么（关心、准备、约定、分享、或者一件悄悄准备的小事）？')
       parts.push('- 回顾最近几轮对话里你说过的话：如果已经向用户提出过某个邀约或约定（比如约好去哪里、做什么、看什么），这次不要再重复提出同样的话——可以轻轻问一句对方的回应，或安静等待；只有确实有新的事情，才值得再次主动开口。')
-      parts.push('- 想清楚之后：如果有值得开口的事，以角色口吻给用户发一条简短的消息（直接输出即可）；如果只是寻常的一天、没有特别想说的，调用 roleplay_silent 静默结束，并把刚才心里想过、但没说出口的念头放进 thought 参数（比如「想提醒他早点睡」「想约他下次一起看星星」），以后在合适的对话里自然提起。')
+      const chatMode = !!(state.settings && state.settings.narrationMode === 'chat')
+      parts.push(chatMode
+        ? '- 想清楚之后：如果有值得开口的事，只发一句台词就够（当前是聊天模式：不要动作/神态/场景描写，不要旁白，像随手发来的一条消息）；如果只是寻常的一天、没有特别想说的，调用 roleplay_silent 静默结束，并把刚才心里想过、但没说出口的念头放进 thought 参数（比如「想提醒他早点睡」「想约他下次一起看星星」），以后在合适的对话里自然提起。'
+        : '- 想清楚之后：如果有值得开口的事，以角色口吻给用户发一条简短的消息（直接输出即可）；如果只是寻常的一天、没有特别想说的，调用 roleplay_silent 静默结束，并把刚才心里想过、但没说出口的念头放进 thought 参数（比如「想提醒他早点睡」「想约他下次一起看星星」），以后在合适的对话里自然提起。')
       pendingHeartbeats.push(parts.join('\n'))
       if (pendingHeartbeats.length > 3) pendingHeartbeats.splice(0, pendingHeartbeats.length - 3)
       wakeHeartbeat()
@@ -2995,8 +3000,16 @@ export function apply(ctx, config) {
             const sStart = state.settings && state.settings.scriptStart ? String(state.settings.scriptStart) : ''
             const sEnd = state.settings && state.settings.scriptEnd ? String(state.settings.scriptEnd) : ''
             // ── 输出规则：模式格式 + 输出风格 合并为单套（每模式一份，避免两套规则打架）──
+            const isChatMode = narration === 'chat'
             let outRules = []
-            if (narration === 'compact') {
+            if (isChatMode) {
+              outRules = [
+                '【输出规则】（当前：聊天模式）',
+                '· 只写她说的话：像在聊天软件里发消息——只有台词，别的什么都没有。禁止动作与神态描写（不要用（……）、不要「她低头」这类叙述）、禁止内心独白、禁止场景/环境/氛围描写、禁止旁白与舞台指示、不要写「' + c.name + '：」这类前缀，也不要加引号。',
+                '· 极简：默认 1 句，最多 2 句；能用一句就不写两句。「嗯。」「在的。」「你怎么了。」这种短句就是合格输出。不解释、不总结、不复述用户说过的话、不铺陈。',
+                '· 用户追问细节时才多说两句，但也不写小作文。',
+              ]
+            } else if (narration === 'compact') {
               outRules = [
                 '【输出规则】（当前：精简模式）',
                 '· 动作/神态至多 1~2 个，用（……）放在句首或单独成段；不要环境描写，不要内心独白（心声只在思考里）；台词直接写出，台词不用括号。',
@@ -3019,12 +3032,18 @@ export function apply(ctx, config) {
               ]
             }
             outRules.push(
-              '· 长度随剧情弹性：日常对话短而真实（1~3 句台词），感伤/认真/告白等关键时刻可以稍长，但每轮最多 5~6 句台词，绝不写小作文；沉默/极短回应同样是合法输出，不占配额。',
+              isChatMode
+                ? '· 长度：1 句为主，最多 2 句；短到像随手回的一条消息。「嗯。」「在的。」这种极短回应同样合法，不占配额。'
+                : '· 长度随剧情弹性：日常对话短而真实（1~3 句台词），感伤/认真/告白等关键时刻可以稍长，但每轮最多 5~6 句台词，绝不写小作文；沉默/极短回应同样是合法输出，不占配额。',
               '· 台词要口语化，像真人说话（短句、语气词、自然的停顿）；只有在感伤、认真、告白这类关键时刻，才允许一点文彩（像电影台词）。',
               '· 口癖（哼 / 才不是 / 笨蛋…）要克制：每轮最多出现 1 次，只在被戳穿、害羞、生气这类时刻；平时说话干净。',
-              '· 避免模板化句式：严禁反复使用「不是……而是……」「才不是……呢」这类固定句式；每轮开头方式要轮换（动作开场 / 直接一句台词 / 问句开场 / 心里的话），连续两轮不要用相同开场；长短句交替。',
-              '· 思考（内部预演）一律用英文书写（台词与动作仍用中文）：完全以角色身份沉浸（官方「角色沉浸」要求）——第一段站在「' + c.name + '」的立场客观分析局面（对方什么心情、本轮关键点、她注意到什么），第二段第一人称角色心声（心里话，用人设语气，口癖克制）。禁止以助手/评测视角分析剧情。注意：思考是内部预演，不算输出——输出里的独白按本模式规则执行。预演末尾自检三问：did I bend my line to please him? / did I stay in character? / did I hurt the relationship without a reason?',
-              '· 她可以不说话：不想接话、情绪低、觉得没话说时不要硬找话。可选回应：只给一个（……）短动作（走开 / 背过身 / 安静做自己的事）、一个「……」、或一句极短敷衍（「嗯。」「随你。」）。沉默之后不要补解释、不要道歉、不要又找话圆场——安静就让它安静。'
+              isChatMode
+                ? '· 避免模板化句式：严禁反复使用「不是……而是……」「才不是……呢」这类固定句式；开场方式要轮换（短问句 / 直接回答 / 语气词起头 / 只丢一个词），连续两轮不要用相同开场。'
+                : '· 避免模板化句式：严禁反复使用「不是……而是……」「才不是……呢」这类固定句式；每轮开头方式要轮换（动作开场 / 直接一句台词 / 问句开场 / 心里的话），连续两轮不要用相同开场；长短句交替。',
+              '· 思考（内部预演）一律用英文书写（台词' + (isChatMode ? '' : '与动作') + '仍用中文）：完全以角色身份沉浸（官方「角色沉浸」要求）——第一段站在「' + c.name + '」的立场客观分析局面（对方什么心情、本轮关键点、她注意到什么），第二段第一人称角色心声（心里话，用人设语气，口癖克制）。禁止以助手/评测视角分析剧情。注意：思考是内部预演，不算输出——输出里的独白按本模式规则执行。预演末尾自检三问：did I bend my line to please him? / did I stay in character? / did I hurt the relationship without a reason?',
+              isChatMode
+                ? '· 她可以不说话：不想接话、情绪低、觉得没话说时不要硬找话——只发一个「……」或一句极短敷衍（「嗯。」「随你。」），不要用动作描写代替。沉默之后不要补解释、不要道歉、不要又找话圆场。'
+                : '· 她可以不说话：不想接话、情绪低、觉得没话说时不要硬找话。可选回应：只给一个（……）短动作（走开 / 背过身 / 安静做自己的事）、一个「……」、或一句极短敷衍（「嗯。」「随你。」）。沉默之后不要补解释、不要道歉、不要又找话圆场——安静就让它安静。'
             )
             lines.push(
               '扮演规则：',
@@ -3960,7 +3979,7 @@ export function apply(ctx, config) {
         }
         if (s.shotMaxW !== undefined) state.settings.shotMaxW = Math.max(0, Number(s.shotMaxW) || 0)
         if (s.autoLook !== undefined) state.settings.autoLook = !!s.autoLook
-        if (s.narrationMode === 'novel' || s.narrationMode === 'compact' || s.narrationMode === 'script') state.settings.narrationMode = s.narrationMode
+        if (NARRATION_MODES.includes(s.narrationMode)) state.settings.narrationMode = s.narrationMode
         if (typeof s.scriptStart === 'string') state.settings.scriptStart = s.scriptStart
         if (typeof s.scriptEnd === 'string') state.settings.scriptEnd = s.scriptEnd
         if (s.statsEnabled !== undefined) state.settings.statsEnabled = !!s.statsEnabled
