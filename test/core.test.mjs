@@ -12,10 +12,17 @@ const ENGINE_URL = new URL('../agent-presets/roleplay/roleplay-host.mjs', import
 
 let PASS = 0, FAIL = 0;
 const failures = [];
+// CI 可读性：失败时额外输出 GitHub 注记(::error::)，这样不用登录也能在
+// check-run 的 annotations 里看到**具体是哪些断言挂了**——否则远程排查只能看到 "exit code 1"。
+const ANNOTATE = !!(process.env.GITHUB_ACTIONS || process.env.RP_TEST_ANNOTATE);
+function annotate(msg) { if (ANNOTATE) console.log('::error::' + String(msg).replace(/\r?\n/g, ' ')) }
 function ok(cond, name) {
   if (cond) { PASS++; console.log('  ✅ ' + name); }
-  else { FAIL++; failures.push(name); console.log('  ❌ ' + name); }
+  else { FAIL++; failures.push(name); console.log('  ❌ ' + name); annotate(name); }
 }
+// 崩溃也要能被 CI 看见具体原因（否则同样只有 exit code 1）
+process.on('uncaughtException', (e) => { annotate('uncaughtException: ' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e)); console.error(e); process.exit(1) });
+process.on('unhandledRejection', (e) => { annotate('unhandledRejection: ' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e)); console.error(e); process.exit(1) });
 
 // ─── T0 语法门: 仓库内全部 JS/MJS 静态检查(与 CI 同源; 防止"本地测试全绿但语法已坏"再发生) ───
 console.log('\nT0 语法门 (全部 JS/MJS)');
@@ -1820,5 +1827,5 @@ console.log('\nT49 隐藏消息');
   ok(visible.length === 1 && visible[0].id === 'rp-hb-1', '历史视图过滤后只剩心跳，格式提醒不出现');
 }
 
-console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); process.exit(1); }
+console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); annotate('共 ' + FAIL + ' 条断言失败: ' + failures.slice(0, 12).join(' / ')); process.exit(1); }
 console.log('ALL TESTS PASSED ✔');
