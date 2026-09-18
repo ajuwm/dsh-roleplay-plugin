@@ -1493,11 +1493,22 @@ console.log('\nT46 卡库与原图(P0/P1)');
 {
   const P = await import(new URL('../agent-presets/roleplay/lib/png-card.mjs', import.meta.url).href);
   const { createHash } = await import('node:crypto');
-  const realPath = 'D:\\dsh\\rp-test\\assets\\st-card-seraphina.png';
+  // ⚠️ 素材必须自造，不能依赖本机文件。
+  // 旧写法写死了 D:\dsh\rp-test\assets\st-card-seraphina.png（只存在于作者机器上），
+  // CI 上该文件不存在 → 回退调用根本不存在的 P.placeholderPng() → 未捕获异常 →
+  // 整个套件 exit 1。CI 从 25f470f（加入 T46 那次）起一直红，就是这个原因。
+  const W = 96, H = 128;
+  const rgba = Buffer.alloc(W * H * 4);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    rgba[i] = (x * 7) % 256; rgba[i + 1] = (y * 5) % 256; rgba[i + 2] = (x + y) % 256; rgba[i + 3] = 255;
+  }
+  const srcPng = P.encodePng({ width: W, height: H, rgba });
+  // 可选：本机若存在真实 ST 卡素材，额外再跑一遍（CI 自动跳过；经 RP_REAL_CARD 可指定）
+  const realPath = process.env.RP_REAL_CARD || 'D:\\dsh\\rp-test\\assets\\st-card-seraphina.png';
   const useReal = existsSync(realPath);
-  const srcPng = useReal ? readFileSync(realPath) : P.placeholderPng(200, 300);
   const head = P.pngSize(srcPng);
-  ok(head && head.width > 0 && head.height > 0, 'pngSize 读出尺寸(' + (useReal ? '真实素材' : '占位图') + ')');
+  ok(head && head.width === W && head.height === H, 'pngSize 读出尺寸(' + (useReal ? '自造素材+本机真实卡' : '自造素材') + ')');
   const dec = P.decodePng(srcPng);
   ok(dec && dec.rgba.length === dec.width * dec.height * 4, 'decodePng 解出 RGBA');
   const small = P.downscaleRgba(dec, 128);
@@ -1517,13 +1528,17 @@ console.log('\nT46 卡库与原图(P0/P1)');
     }
     return Buffer.concat(out)
   }
+  // 原图往返无损：现在用自造素材也能验（非文本块 sha256 必须一致）
+  const rt = P.writeCardToPng({ spec: 'chara_card_v2', data: { name: 'x' } }, srcPng)
+  ok(createHash('sha256').update(stripText(rt)).digest('hex') === createHash('sha256').update(stripText(srcPng)).digest('hex'), '导出保留原图像素(非文本块 sha256 一致)')
   if (useReal) {
-    const rt = P.writeCardToPng({ spec: 'chara_card_v2', data: { name: 'x' } }, srcPng)
-    ok(createHash('sha256').update(stripText(rt)).digest('hex') === createHash('sha256').update(stripText(srcPng)).digest('hex'), '导出保留原图像素(非文本块 sha256 一致)')
+    const realPng = readFileSync(realPath)
+    const rtReal = P.writeCardToPng({ spec: 'chara_card_v2', data: { name: 'x' } }, realPng)
+    ok(createHash('sha256').update(stripText(rtReal)).digest('hex') === createHash('sha256').update(stripText(realPng)).digest('hex'), '真实 ST 卡素材往返无损(本机可选校验)')
   }
   const b = await boot();
   const cardJson = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: '画中仙', description: '人设文本', first_mes: '你好', mes_example: '示例对话', character_book: { entries: [{ keys: ['画'], content: '画中有世界。', enabled: true }] } } }
-  const cardPng = P.writeCardToPng(cardJson, useReal ? srcPng : null)
+  const cardPng = P.writeCardToPng(cardJson, srcPng)
   const imp = await b.svc.cardImportPng({ sessionId: 't-session', base64: cardPng.toString('base64') })
   ok(imp && imp.ok === true && imp.name === '画中仙', '导入 PNG 卡成功');
   ok(imp.withArt === true, '导入时保留了原图(withArt)');
@@ -1534,9 +1549,8 @@ console.log('\nT46 卡库与原图(P0/P1)');
   const exp = await b.svc.cardExportPng({ sessionId: 't-session', card: '画中仙' });
   ok(exp && exp.ok && exp.withArt === true, '导出带原图');
   ok(P.readCardFromPng(Buffer.from(exp.base64, 'base64')).json.data.mes_example === '示例对话', '导出保留 mes_example(旧实现写死空串)');
-  if (useReal) {
-    ok(createHash('sha256').update(stripText(Buffer.from(exp.base64, 'base64'))).digest('hex') === createHash('sha256').update(stripText(cardPng)).digest('hex'), '导出的图像与导入时一致(往返无损)')
-  }
+  // 往返无损：导出字节的纯图像部分必须等于导入时那张（任何素材都成立，故不再依赖本机文件）
+  ok(createHash('sha256').update(stripText(Buffer.from(exp.base64, 'base64'))).digest('hex') === createHash('sha256').update(stripText(cardPng)).digest('hex'), '导出的图像与导入时一致(往返无损)')
   const brief = await b.svc.cardBrief({ sessionId: 't-session' });
   ok(brief && brief.ok && brief.cards.length === 1 && brief.cards[0].hasArt === true, 'cardBrief 画廊数据(含头像标记)');
   const det = await b.svc.cardDetail({ sessionId: 't-session', card: '画中仙' });
