@@ -28,9 +28,16 @@
 **推荐:官方插件命令(需要 pnpm;DSH Desktop 自带,或 `npm i -g pnpm`)**
 
 ```powershell
+# CLI 版 dsh(dsh web 起浏览器界面)→ profile 名是 web
 dsh plugin --profile web add github:ajuwm/dsh-roleplay-plugin
-# 更新/卸载: dsh plugin --profile web update @ajuwm/dsh-roleplay-plugin
-#               dsh plugin --profile web remove @ajuwm/dsh-roleplay-plugin
+
+# 官方桌面版(DeepSeek Harness 桌面应用)→ profile 名是 desktop
+dsh plugin --profile desktop add github:ajuwm/dsh-roleplay-plugin
+
+# 两个都装了,就两条各跑一遍 —— 预设与数据在 %DSH_HOME% 与工作区里共享,不会装两份
+# 更新/卸载:把 add 换成 update / remove,profile 参数照旧
+#   dsh plugin --profile desktop update @ajuwm/dsh-roleplay-plugin
+#   dsh plugin --profile desktop remove @ajuwm/dsh-roleplay-plugin
 ```
 
 安装后重启 DSH:角色扮演预设自动物化到 `%DSH_HOME%\.agent-presets\`,侧栏自动挂载。桌宠**程序**随包;桌宠**立绘素材**请自备(放工作区 `pet\`,见下方说明)。
@@ -38,8 +45,9 @@ dsh plugin --profile web add github:ajuwm/dsh-roleplay-plugin
 **备选:一键脚本(`install.ps1`)**
 
 ```powershell
-pwsh install.ps1            # 安装并兼容清理旧版手动布局
-pwsh install.ps1 -Uninstall # 回滚
+pwsh install.ps1                     # 安装并兼容清理旧版手动布局(profile 自动识别)
+pwsh install.ps1 -DshProfile desktop # 手动指定 profile(官方桌面版)
+pwsh install.ps1 -Uninstall          # 回滚
 ```
 
 **手动(不推荐)**:
@@ -48,6 +56,22 @@ pwsh install.ps1 -Uninstall # 回滚
 3. 桌宠立绘:放入 **DSH 工作区**下的 `pet` 目录(默认 `<DSH 工作区>\pet`,可用 `DSH_PET_DIR` 覆盖;工作区 ≠ `%USERPROFILE%\.dsh`)
 4. `settings.yaml` 里 `agent-presets.default: roleplay`
 5. 重启 DSH,新建会话,说「开始/开演」或侧栏按钮开始扮演
+
+
+### 兼容 DSH 0.1.1 与 0.2.0(含官方桌面版)
+
+插件在**运行时探测**宿主,两套声明机制各走各的路,你不需要选:
+
+| | DSH 0.1.1 | DSH 0.2.0(官方桌面版) |
+|---|---|---|
+| 角色预设 | 官方扫描 `%DSH_HOME%\.agent-presets\` 目录(插件负责物化) | 官方取消了目录扫描,插件改用 `agentPresets.register()` 直接登记「恋爱向」预设 |
+| 开关存在哪 | DSH 设置命名空间 `roleplay` | `%DSH_HOME%\.roleplay-switches.json` |
+| 开关在哪改 | 设置 → 插件 → 角色扮演 | 设置 → 内置插件 → 🎭 角色扮演(**或**侧栏「设置 → 功能开关(稳定版)」) |
+
+- 两版**共用同一份组合文件**(`agent-presets/<预设>/agent.cordis.yml`):0.2.0 用 `cordis:include` 指向它,预设里的相对路径与 `baseUrl` 语义完全不变。
+- 从 0.1.1 升到 0.2.0 时,插件会**自动把旧 `settings.yaml` 里 `roleplay:` 段的用户值搬进新文件**(一次性,第一次运行时做)。
+- 0.2.0 官方没有给第三方插件通用设置卡片,所以本插件自带开关面板(上表两个入口)。
+- 开关关掉 = 对应子系统**真的不跑**(定时器不注册、工具不注册、不 spawn 子进程、不写盘),不是只把界面藏起来;**数据一律保留**,随时开回来。
 
 > 角色扮演默认会话预设即用;桌宠是可选的附加,不开启不影响角色扮演。
 

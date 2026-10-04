@@ -19,12 +19,12 @@ import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twenty
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
 import { pickSnapshotDir, missingOf } from './lib/backup-core.mjs?v=1'
+import { readSwitches } from './lib/switch-store.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
 export function apply(ctx, config) {
-    // 预设风格: love=恋爱向(默认) / friend=朋友向(纯友谊轴) / oc=OC 原创向(全空白)
-    const STYLE = (config && config.style) || 'love'
+    // 单预设时代：只剩「恋爱向」，风格分支已随朋友向/OC 预设一并移除
     // 数据根(每预设独立): 默认 .roleplay; 可经 config.dataRoot 指定
     const REL_ROOT = (config && config.dataRoot && typeof config.dataRoot === 'string') ? config.dataRoot : '.roleplay'
     const agents = ctx.agents
@@ -49,8 +49,16 @@ export function apply(ctx, config) {
     // 面板双向同步（角色扮演卡），不存在则退化为仅用 state.settings（侧栏仍可编辑）。
     // 迁移到面板的字段；scriptStart/scriptEnd 及角色字段留在侧栏。
     // DSH 插件设置命名空间「roleplay」双通道同步（仅恋爱向使用；friend/oc 独立预设不共享面板设置）
-    const settingsSvc = STYLE === 'love' ? ctx.get('settings') : undefined
-    const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW', 'relPace', 'storyEnabled', 'summaryEnabled', 'userProfileEnabled']
+    // ⚠️ 这套双向同步只对「命名空间版」settings 服务成立（0.1.1：有 get/update）。
+    // 0.2.0 的 SettingsForms 也有 update()，但语义完全不同（写的是 profile 条目补丁），
+    // 当命名空间用会污染用户 profile —— 所以用 get() 做能力探测，新版一律退化为无同步。
+    const settingsSvc = (() => {
+      try {
+        const s = ctx.get('settings')
+        return s && typeof s.get === 'function' ? s : undefined
+      } catch (e) { return undefined }
+    })()
+    const MIGRATED_KEYS = ['heartbeatMinutes', 'narrationMode', 'difficulty', 'statsEnabled', 'relationEnabled', 'autoLook', 'shotMaxW', 'relPace', 'storyEnabled', 'summaryEnabled', 'userProfileEnabled', 'enabled', 'stableMode', 'heartbeatEnabled', 'deskpetEnabled', 'notesEnabled', 'gameEnabled', 'loreEnabled', 'stImportEnabled', 'backupEnabled', 'desktopLookEnabled']
     // 叙述风格（输出规则）：novel 小说 / script 剧本 / compact 精简 / chat 聊天（只有台词）
     const NARRATION_MODES = ['novel', 'script', 'compact', 'chat']
     function pickMigrated(obj) {
@@ -76,6 +84,9 @@ export function apply(ctx, config) {
       if (patch.autoLook !== undefined) out.autoLook = !!patch.autoLook
       if (NARRATION_MODES.includes(patch.narrationMode)) out.narrationMode = patch.narrationMode
       if (patch.statsEnabled !== undefined) out.statsEnabled = !!patch.statsEnabled
+      for (const k of ['enabled', 'stableMode', 'heartbeatEnabled', 'deskpetEnabled', 'notesEnabled', 'gameEnabled', 'loreEnabled', 'stImportEnabled', 'backupEnabled', 'desktopLookEnabled']) {
+        if (patch[k] !== undefined) out[k] = !!patch[k]
+      }
       if (patch.difficulty === 1 || patch.difficulty === 2 || patch.difficulty === 3) out.difficulty = patch.difficulty
       if (patch.relationEnabled !== undefined) out.relationEnabled = !!patch.relationEnabled
       if (patch.relPace === 'slow' || patch.relPace === 'normal' || patch.relPace === 'fast') out.relPace = patch.relPace
@@ -173,7 +184,7 @@ export function apply(ctx, config) {
       // v1 → v2：无字段结构调整（仅补版本标记；后续变更在此累加）
       return parsed
     }
-    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: STYLE !== 'oc', difficulty: 2, relationEnabled: STYLE !== 'oc', relPace: 'normal', storyEnabled: true, userProfileEnabled: true, summaryEnabled: true }
+    const DEFAULT_SETTINGS = { heartbeatMinutes: 30, shotMaxW: 0, autoLook: false, narrationMode: 'novel', scriptStart: '', scriptEnd: '', statsEnabled: true, difficulty: 2, relationEnabled: true, relPace: 'normal', storyEnabled: true, userProfileEnabled: true, summaryEnabled: true }
     // ── 养成系统：生命体征 + 商城经济 ────────────────────────────────────
     const DEFAULT_STATS = { satiety: 75, health: 85, mood: 70, hp: 100, since: null }
     const DEFAULT_ECONOMY = { coins: 100, lastDaily: null, earnedToday: 0, lastFeedAt: 0, lastFeedDay: null, streak: 0, lastWorkDay: null, dailyGiftDay: null }
@@ -188,6 +199,40 @@ export function apply(ctx, config) {
       { id: 'pendant', name: '星穹挂坠', kind: 'gift', price: 80, mood: 25 },
     ]
     const clamp = (v, lo, hi) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : lo }
+    // ── 功能开关(稳定版)──────────────────────────────────────────────
+    // 实时读 DSH 设置命名空间(不依赖 settingsSvc —— 它只对恋爱向预设生效),并与工作区
+    // 自己那份 state.settings 取「关」优先。这样三个预设 + 面板/侧栏两条通道都能生效。
+    // 开关来源由 switch-store 统一适配：0.1.1 读设置命名空间 roleplay；
+    // 0.2.0 那个 API 没了（没有 register / get）→ 读 $DSH_HOME/.roleplay-switches.json。
+    // 读不到一律回落默认值（全开），等价于升级前的行为。
+    function nsSettings() {
+      try { return readSwitches(ctx) } catch (e) { return null }
+    }
+    // 总开关:关掉 = 整个插件静默(含不注入提示词)
+    function masterOff() {
+      const n = nsSettings()
+      if (n && n.enabled === false) return true
+      if (state.settings && state.settings.enabled === false) return true
+      return false
+    }
+    // 子系统开关:总开关关 或 稳定模式开 或 该项显式关 → 一律视为「关」
+    function subOff(key) {
+      const n = nsSettings()
+      if (n && n.stableMode === true) return true
+      if (n && n[key] === false) return true
+      if (state.settings && state.settings.stableMode === true) return true
+      if (state.settings && state.settings[key] === false) return true
+      return false
+    }
+    function pluginEnabled() { return !masterOff() }
+    function heartbeatOn() { return pluginEnabled() && !subOff('heartbeatEnabled') }
+    function deskpetOn() { return pluginEnabled() && !subOff('deskpetEnabled') }
+    function notesOn() { return pluginEnabled() && !subOff('notesEnabled') }
+    function gameOn() { return pluginEnabled() && !subOff('gameEnabled') }
+    function loreOn() { return pluginEnabled() && !subOff('loreEnabled') }
+    function stImportOn() { return pluginEnabled() && !subOff('stImportEnabled') }
+    function desktopLookOn() { return pluginEnabled() && !subOff('desktopLookEnabled') }
+
     function statsEnabled() { return !(state.settings && state.settings.statsEnabled === false) }
     function difficultyMul() {
       const d = (state.settings && state.settings.difficulty) || 2
@@ -217,19 +262,7 @@ export function apply(ctx, config) {
       { id: 'm7', name: '约定的日子一起去…', req: { trustTier: 3, heartTier: 2 }, reward: { trust: 5, heart: 8, bfReliability: 4 } },
       { id: 'm8', name: '确认关系', req: { favorTier: 3, trustTier: 3, heartTier: 3 }, reward: { heart: 10 } },
     ]
-    // 朋友向里程碑（纯友谊轴，无心动/男友力）
-    const FRIEND_MILESTONES = [
-      { id: 'm1', name: '第一次成功搭话', req: { favorTier: 1 }, reward: { favor: 6 } },
-      { id: 'm2', name: '第一次记住她的喜好', req: { favorTier: 2 }, reward: { favor: 5, trust: 3 } },
-      { id: 'm3', name: '她难受时你陪在身边', req: { trustTier: 2 }, reward: { trust: 8, favor: 4 } },
-      { id: 'm4', name: '第一次守约', req: { trustTier: 2 }, reward: { trust: 7 } },
-      { id: 'm5', name: '她主动跟你分享心事', req: { favorTier: 3, trustTier: 2 }, reward: { trust: 8, favor: 6 } },
-      { id: 'm6', name: '一起经历过重要的事', req: { favorTier: 3, trustTier: 3 }, reward: { favor: 7 } },
-      { id: 'm7', name: '互相帮过对方一次大忙', req: { trustTier: 3 }, reward: { trust: 5, favor: 5 } },
-      { id: 'm8', name: '成为可以托付心事的知己', req: { favorTier: 3, trustTier: 3 }, reward: { trust: 10, favor: 8 } },
-    ]
-    const MILESTONES = STYLE === 'friend' ? FRIEND_MILESTONES : LOVE_MILESTONES
-    function isFriendStyle() { return STYLE === 'friend' }
+    const MILESTONES = LOVE_MILESTONES
     function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
@@ -531,7 +564,6 @@ export function apply(ctx, config) {
       const eff = { ...dd.delta }
       for (const k of ['favor', 'trust', 'heart']) if (typeof eff[k] === 'number') eff[k] = Math.round(eff[k] * pace.mul * 10) / 10
       const res = applyDelta(state.relation || { ...DEFAULT_RELATION }, state.boyfriend || { ...DEFAULT_BOYFRIEND }, state.milestones || [], eff, {
-        isFriend: isFriendStyle(),
         milestonesDef: MILESTONES,
         tierLabels: TIER_LABELS,
         bfLabels: BF_LABELS,
@@ -732,11 +764,13 @@ export function apply(ctx, config) {
 
     // 想念系统：用户真实互动时更新 lastSeen（60s 节流写盘）+ 经济收入
     function touchSeen() {
+      // 稳定版:总开关关掉 → 不记在线、不排队落盘、不发每日金币
+      if (!pluginEnabled()) return
       state.lastSeen = Date.now()
       // 每日首次互动 +10 金币
       const now = new Date()
       const e = state.economy || (state.economy = { ...DEFAULT_ECONOMY })
-      if (e.lastDaily !== dayKey(now)) {
+      if (statsEnabled() && e.lastDaily !== dayKey(now)) {
         e.lastDaily = dayKey(now)
         e.earnedToday = 0
         e.coins = (e.coins || 0) + 10
@@ -1216,6 +1250,8 @@ export function apply(ctx, config) {
 
     // 便签到期提醒: 到期且未提醒的便签 → 桌宠气泡 + 排队一条角色口吻提醒消息
     async function checkDueNotes(now) {
+      // 稳定版:便签关掉 / 总开关关掉 → 不提醒、不写 bubble.txt、不落盘
+      if (!pluginEnabled() || !notesOn()) return
       if (!stateLoaded || !state.enabled || !state.character) return 0
       const due = dueNotes(state.notes || [], now instanceof Date ? now.getTime() : (Number(now) || Date.now()))
       if (!due.length) return 0
@@ -1376,6 +1412,9 @@ export function apply(ctx, config) {
     }
 
     async function maybeFireHeartbeat(now) {
+      // 稳定版:心跳关掉 / 总开关关掉 → 不论从定时器还是侧栏轮询(getState)进来都不干活。
+      // 审计发现:原来只有定时器受管,侧栏每 1.5 秒轮询 getState 也能触发心跳。
+      if (!heartbeatOn()) return
       // 定时器路径既无发起者边界也无桥接调用：先自认领会话 + 加载状态，否则下面第一个
       // gate 会静默 return（v1.5.24 前实测：ticks 一直涨，fired/woken 长期 0）。
       if (!selfAgent) bindSelfAgent()
@@ -1538,8 +1577,31 @@ export function apply(ctx, config) {
     // 注意：静态 register() 只接受具体类型的输出 schema（不接受 'json'）；本插件的
     // 全部工具都返回 JSON 对象，因此统一声明 { type: 'object' }。
     const toolExec = {}
+    // ── 稳定版闸门:关掉的子系统**不注册**该工具(模型根本看不到它)。
+    // 注意 toolExec[name] 仍然写入 —— 内部路径调用不受影响,只挡模型的可见面。
+    const TOOL_GATE = {
+      roleplay_lore: () => !loreOn(),
+      roleplay_import_char: () => !stImportOn(),
+      roleplay_note: () => !notesOn(),
+      roleplay_game: () => !gameOn(),
+      roleplay_look_desktop: () => !desktopLookOn(),
+      // ⚠️ 刻意不 gate statsEnabled/relationEnabled/storyEnabled 的工具:那三套开关的
+      // 既有语义是「工具照注册, 调用时返回已关闭」(执行体里本来就有 gate)。挂载期不注册
+      // 会改变既有行为 —— OC 预设默认 stats/relation=false, 会让相关工具整体消失(T50 抓到过)。
+    }
+    const skippedTools = []
     function registerTool(name, description, parameters, execute) {
       toolExec[name] = execute
+      if (!pluginEnabled()) { skippedTools.push(name); return }
+      const gate = TOOL_GATE[name]
+      if (gate && gate()) { skippedTools.push(name); return }
+      // 运行期闸门:挂载之后再关开关,已注册的工具也要立刻失效(执行时才判定)
+      const guarded = async (args) => {
+        if (!pluginEnabled()) return { ok: false, message: '角色扮演插件已关闭(设置里的总开关)' }
+        const g = TOOL_GATE[name]
+        if (g && g()) return { ok: false, message: '该功能已在设置里关闭' }
+        return execute(args)
+      }
       try {
         ctx.tools.register({
           name, description, parameters,
@@ -1547,7 +1609,7 @@ export function apply(ctx, config) {
             schema: { type: 'object' },
             render: (args, value) => [{ type: 'text', text: JSON.stringify(value) }],
           },
-          execute,
+          execute: guarded,
         })
       } catch (error) {
         throw new Error('registerTool failed for "' + name + '": ' + (error && error.message ? error.message : String(error)))
@@ -2851,7 +2913,8 @@ export function apply(ctx, config) {
       systemPrompt.section(cfg)
     }
 
-    if (systemPrompt) {
+    // 总开关关掉 → 一段都不注入:角色变回普通助手(这是「整体关闭」的定义)
+    if (systemPrompt && pluginEnabled()) {
       addSection({
         name: 'roleplay.character',
         order: 200,
@@ -2888,7 +2951,7 @@ export function apply(ctx, config) {
                 rl.push('──── 【角色：' + n + '】 ────')
                 rl.push('人设：' + expandStMacros(snap ? snap.persona : (n === c.name ? c.persona : '（资料加载中）')))
                 if (snap && snap.relation) {
-                  rl.push('与玩家当前关系：好感 ' + tierLabel('favor', snap.relation.favor) + ' · 信任 ' + tierLabel('trust', snap.relation.trust) + (snap.relation.heart !== undefined && !isFriendStyle() ? ' · 心动 ' + tierLabel('heart', snap.relation.heart) : ''))
+                  rl.push('与玩家当前关系：好感 ' + tierLabel('favor', snap.relation.favor) + ' · 信任 ' + tierLabel('trust', snap.relation.trust) + (snap.relation.heart !== undefined ? ' · 心动 ' + tierLabel('heart', snap.relation.heart) : ''))
                 }
                 if (snap && snap.mems && snap.mems.length) rl.push('她记得的事：' + snap.mems.join('；'))
                 if (n === c.name && c.greeting && !saidGreeting) rl.push('【开场问候语】' + n + '第一次见面，可先用这句开场（只说一次）：' + expandStMacros(c.greeting))
@@ -2950,29 +3013,17 @@ export function apply(ctx, config) {
               const b = state.boyfriend || DEFAULT_BOYFRIEND
               const ms = state.milestones || []
               const paceLbl = relPaceCfg().label
-              const relAnchor = '【加减参照】当前难度：' + paceLbl + '。按行为定性给分：举手之劳/礼貌寒暄 +0~1；被夸奖/分享日常/一起活动 +1~2；记住喜好/表达理解/关心对方 +2~3；关键时刻陪伴/守约 +3~5；真诚道歉/弥补 +2~3；食言/冷落/发脾气 -2~4；关键时刻不在/背弃承诺 -5~8。单轮|加减|≤8；同向行为连续两次后系统会自动递减，别再给同一行为刷分。' + (isFriendStyle() ? '' : '心动只在关键时刻 +1~3（好感与信任都到「亲近/放心」档才生效）。') + '【祛魅规则】无实质内容的纯夸奖/连夸(嘴甜但没行动) → 好感 +0 甚至 -1(她察觉敷衍); 答应→没做到(言行不一) → 信任 -2~4、好感 -1~2; 冷漠/敷衍回复 → 双方 -1; 长时间真心陪伴/实质行动(做一顿饭/陪熬夜/记住她的药) → 溢价 +1~2——她在意的不是嘴, 是"在"。'
-              if (isFriendStyle()) {
-                lines.push(
-                  '【关系】好感 ' + Math.round(r.favor) + '（' + tierLabel('favor', r.favor) + '）· 信任 ' + Math.round(r.trust) + '（' + tierLabel('trust', r.trust) + '）',
-                  '已触发里程碑：' + (ms.length ? ms.map((id) => { const m = MILESTONES.find((x) => x.id === id); return m ? m.name : id }).join('、') : '无') + '（共 ' + ms.length + '/8）'
-                )
-                if (state.recentActs && state.recentActs.length) {
-                  lines.push('最近他做了：' + state.recentActs.slice(-4).map((a) => a.act).join('；'))
-                }
-                lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；食言/关键时刻不在会真实地掉信任。你们是朋友/同伴关系，不要往恋爱方向带节奏。关系数值是后台记录，不要向玩家汇报数值；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
-                lines.push(relAnchor)
-              } else {
-                lines.push(
-                  '【关系】好感 ' + Math.round(r.favor) + '（' + tierLabel('favor', r.favor) + '）· 信任 ' + Math.round(r.trust) + '（' + tierLabel('trust', r.trust) + '）· 心动 ' + Math.round(r.heart) + '（' + tierLabel('heart', r.heart) + '）',
-                  '男友力：靠谱 ' + b.reliability + ' · 感性 ' + b.empathy + ' · 情绪稳 ' + b.stability + ' · 上进 ' + b.ambition,
-                  '已触发里程碑：' + (ms.length ? ms.map((id) => { const m = MILESTONES.find((x) => x.id === id); return m ? m.name : id }).join('、') : '无') + '（共 ' + ms.length + '/8）'
-                )
-                if (state.recentActs && state.recentActs.length) {
-                  lines.push('最近他做了：' + state.recentActs.slice(-4).map((a) => a.act).join('；'))
-                }
-                lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；心动需好感+信任到位才可正增；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任。关系数值是后台记录，不要向玩家汇报数值；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
-                lines.push(relAnchor)
+              const relAnchor = '【加减参照】当前难度：' + paceLbl + '。按行为定性给分：举手之劳/礼貌寒暄 +0~1；被夸奖/分享日常/一起活动 +1~2；记住喜好/表达理解/关心对方 +2~3；关键时刻陪伴/守约 +3~5；真诚道歉/弥补 +2~3；食言/冷落/发脾气 -2~4；关键时刻不在/背弃承诺 -5~8。单轮|加减|≤8；同向行为连续两次后系统会自动递减，别再给同一行为刷分。' + '心动只在关键时刻 +1~3（好感与信任都到「亲近/放心」档才生效）。' + '【祛魅规则】无实质内容的纯夸奖/连夸(嘴甜但没行动) → 好感 +0 甚至 -1(她察觉敷衍); 答应→没做到(言行不一) → 信任 -2~4、好感 -1~2; 冷漠/敷衍回复 → 双方 -1; 长时间真心陪伴/实质行动(做一顿饭/陪熬夜/记住她的药) → 溢价 +1~2——她在意的不是嘴, 是"在"。'
+              lines.push(
+                '【关系】好感 ' + Math.round(r.favor) + '（' + tierLabel('favor', r.favor) + '）· 信任 ' + Math.round(r.trust) + '（' + tierLabel('trust', r.trust) + '）· 心动 ' + Math.round(r.heart) + '（' + tierLabel('heart', r.heart) + '）',
+                '男友力：靠谱 ' + b.reliability + ' · 感性 ' + b.empathy + ' · 情绪稳 ' + b.stability + ' · 上进 ' + b.ambition,
+                '已触发里程碑：' + (ms.length ? ms.map((id) => { const m = MILESTONES.find((x) => x.id === id); return m ? m.name : id }).join('、') : '无') + '（共 ' + ms.length + '/8）'
+              )
+              if (state.recentActs && state.recentActs.length) {
+                lines.push('最近他做了：' + state.recentActs.slice(-4).map((a) => a.act).join('；'))
               }
+              lines.push('【关系判断规则】判断关系加减按"行为而非频率、事件重于日常、负向要真实"：同一行为重复加成递减；心动需好感+信任到位才可正增；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任。关系数值是后台记录，不要向玩家汇报数值；重要转折（迈向新档位/里程碑）时可以在台词里自然暗示。')
+              lines.push(relAnchor)
             }
             const upLine = userProfileLines()
             if (upLine) lines.push(upLine)
@@ -3148,11 +3199,17 @@ export function apply(ctx, config) {
 
     // ==================== 心跳引擎 ====================
 
-    ctx.interval(() => {
-      hbDiag.ticks++
-      // 定时器回调里的 rejection 此前是静默的（unhandled）：显式接住，心跳故障可见
-      Promise.resolve().then(() => maybeFireHeartbeat(new Date())).catch((e) => console.error('roleplay: heartbeat tick failed', e))
-    }, 60 * 1000)
+    // 稳定版:关掉心跳就**不注册定时器**;注册了的那份也会在每拍自查(面板一改,下一拍即停)
+    if (heartbeatOn()) {
+      ctx.interval(() => {
+        if (!heartbeatOn()) return
+        hbDiag.ticks++
+        // 定时器回调里的 rejection 此前是静默的（unhandled）：显式接住，心跳故障可见
+        Promise.resolve().then(() => maybeFireHeartbeat(new Date())).catch((e) => console.error('roleplay: heartbeat tick failed', e))
+      }, 60 * 1000)
+    } else {
+      console.log('[roleplay] 稳定版:心跳定时器未注册')
+    }
 
     // ==================== 事件监听 ====================
 
@@ -3248,10 +3305,16 @@ export function apply(ctx, config) {
       if (changed) await saveState()
     })
 
-    ctx.interval(() => {
-      if (!stateLoaded || !state.enabled || !state.character) return
-      scanAssistantMessages(currentSession())
-    }, 20000)
+    // 稳定版:总开关关掉 → 20 秒扫描定时器不注册
+    if (pluginEnabled()) {
+      ctx.interval(() => {
+        if (!pluginEnabled()) return
+        if (!stateLoaded || !state.enabled || !state.character) return
+        scanAssistantMessages(currentSession())
+      }, 20000)
+    } else {
+      console.log('[roleplay] 稳定版:20 秒扫描定时器未注册')
+    }
 
     // ==================== 对外服务（浏览器桥接读取） ====================
 
@@ -3359,7 +3422,7 @@ export function apply(ctx, config) {
           backupInfo: { lastAt: backupLastAt, root: BACKUP_ROOT_ABS },
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
-          relation: relationEnabled() ? (isFriendStyle() ? { favor: (state.relation || DEFAULT_RELATION).favor, trust: (state.relation || DEFAULT_RELATION).trust } : { ...(state.relation || DEFAULT_RELATION) }) : null,
+          relation: relationEnabled() ? { ...(state.relation || DEFAULT_RELATION) } : null,
           tierInfo: relationEnabled() ? {
             stage: relationStage(),
             stageName: STAGE_LABELS[relationStage()],
@@ -3369,7 +3432,7 @@ export function apply(ctx, config) {
               return { key: k, value: v, tier: axisTier(v), progress: progressOf(v), next: nextTierText(v), label: TIER_LABELS[k][axisTier(v) - 1] }
             }),
           } : null,
-          boyfriend: (relationEnabled() && !isFriendStyle()) ? { ...(state.boyfriend || DEFAULT_BOYFRIEND) } : null,
+          boyfriend: relationEnabled() ? { ...(state.boyfriend || DEFAULT_BOYFRIEND) } : null,
           milestones: relationEnabled() ? (state.milestones || []) : null,
           relationStage: relationEnabled() ? STAGE_LABELS[relationStage()] : null,
           relationEnabled: relationEnabled(),
@@ -4082,6 +4145,7 @@ export function apply(ctx, config) {
     ctx.provide('roleplay', roleplayApi)
 
     // 挂载时先尝试认领会话（currentInitiator 常为 undefined，真正的兜底是心跳 tick 里的 bindSelfAgent）
-    if (!selfAgent) bindSelfAgent()
+    // 总开关关掉时连这次探测都跳过：承诺是「完全静默」，连日志都不该冒出来。
+    if (!selfAgent && !masterOff()) bindSelfAgent()
     if (selfAgent) ensureLoaded()
 }

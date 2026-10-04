@@ -269,7 +269,6 @@
     - id: roleplay-host
       name: './roleplay-host.mjs?gen=33'
       config:
-        style: love
 
 # ---- 桌宠已移至插件 bundle 补丁(host 平面) ----
 # 原因: 桌宠是工作区级桌面窗口(非会话级), 且曾以预设行形式导致整棵组合树

@@ -8,6 +8,11 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
+// 测试隔离：稳定版开关在 0.2.0 下落盘到 %DSH_HOME%/.roleplay-switches.json ——
+// 单测绝不允许读到或写到用户真实 home（踩过一次：T50 的读路径把迁移结果写进了真实 %DSH_HOME%）。
+// 在任何模块加载前把它指到临时目录。
+process.env.DSH_ROLEPLAY_SWITCHES = join(mkdtempSync(join(tmpdir(), 'rp-switch-iso-')), 'switches.json');
+
 const ENGINE_URL = new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url).href;
 
 let PASS = 0, FAIL = 0;
@@ -29,32 +34,20 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
 {
   const SYNTAX_FILES = [
     'agent-presets/roleplay/roleplay-host.mjs',
-    'agent-presets/roleplay-friend/roleplay-host.mjs',
-    'agent-presets/roleplay-oc/roleplay-host.mjs',
     'agent-presets/roleplay/lib/relation-core.mjs',
     'agent-presets/roleplay/lib/time-core.mjs',
     'agent-presets/roleplay/lib/chat-core.mjs',
-    'agent-presets/roleplay-friend/lib/chat-core.mjs',
-    'agent-presets/roleplay-oc/lib/chat-core.mjs',
     'agent-presets/roleplay/lib/notes-core.mjs',
-    'agent-presets/roleplay-friend/lib/notes-core.mjs',
-    'agent-presets/roleplay-oc/lib/notes-core.mjs',
     'agent-presets/roleplay/lib/game-core.mjs',
-    'agent-presets/roleplay-friend/lib/game-core.mjs',
-    'agent-presets/roleplay-oc/lib/game-core.mjs',
     'agent-presets/roleplay/lib/heartbeat-core.mjs',
-    'agent-presets/roleplay-friend/lib/heartbeat-core.mjs',
-    'agent-presets/roleplay-oc/lib/heartbeat-core.mjs',
     'agent-presets/roleplay/lib/rel-tier-core.mjs',
-    'agent-presets/roleplay-friend/lib/rel-tier-core.mjs',
-    'agent-presets/roleplay-oc/lib/rel-tier-core.mjs',
     'agent-presets/roleplay/lib/backup-core.mjs',
-    'agent-presets/roleplay-friend/lib/backup-core.mjs',
-    'agent-presets/roleplay-oc/lib/backup-core.mjs',
+    'agent-presets/roleplay/lib/switch-store.mjs',
     'agent-presets/roleplay/deskpet.mjs',
     'lib/index.js',
     'lib/client.js',
     'lib/settings.js',
+    'lib/preset-registration.mjs',
   ];
   const root = fileURLToPath(new URL('..', import.meta.url));
   let bad = 0;
@@ -222,33 +215,6 @@ console.log('\nT3 亲密度按角色隔离');
 }
 
 // ─── T4 朋友向: 无心动/男友力 ───────────────────────────────
-console.log('\nT4 朋友向纯友谊轴');
-{
-  const b = await boot('friend');
-  await b.call('roleplay_start', { name: '丙', persona: 'p丙' });
-  await b.call('roleplay_relation', { favor: 5, heart: 5, boyfriend: { reliability: 10 } });
-  const st = await b.gs();
-  ok(st.relation && st.relation.favor === 35 && st.relation.trust === 20, '好感 +5、信任默认');
-  ok(!('heart' in (st.relation || {})), 'friend 不返回 heart');
-  ok(st.boyfriend === null, 'friend 无男友力');
-  const pf = JSON.parse(readFileSync(join(b.root, b.dataRoot, 'progress-丙.json'), 'utf8'));
-  ok(pf.relation.heart === 10 && pf.boyfriend.reliability === 50, 'heart/男友力未被改动(各自默认)');
-  rmSync(b.root, { recursive: true, force: true });
-}
-
-// ─── T5 OC 向: 全空白默认 ──────────────────────────────────
-console.log('\nT5 OC 原创向全空白');
-{
-  const b = await boot('oc');
-  const st = await b.gs();
-  ok(st.settings && st.settings.statsEnabled === false, 'OC 默认 statsEnabled=false');
-  ok(st.settings && st.settings.relationEnabled === false, 'OC 默认 relationEnabled=false');
-  const r = await b.call('roleplay_shop', { action: 'list' });
-  ok(r && r.ok === false, '商城被门卫拦截');
-  rmSync(b.root, { recursive: true, force: true });
-}
-
-// ─── T6 养成/商城彻底关闭(恋爱向但预置关闭) ──────────────────
 console.log('\nT6 养成/商城关闭门卫');
 {
   const b = await boot('love', { enabled: false, character: null, settings: { statsEnabled: false, relationEnabled: false } });
@@ -484,24 +450,23 @@ console.log('\nT16 多角色房间');
 }
 
 // ─── T17 卡库全局(跨预设/跨对话共用) ─────────────────────────
-console.log('\nT17 卡库全局共享');
+console.log('\nT17 多实例共享卡库');
 {
+  // 单预设时代:不再有「跨预设读卡」这回事 —— 但「同一数据根上跑两个实例」仍然存在
+  // (桌宠行 + 预设各挂一份本插件),卡库/记忆的进程内写队列与读合并靠的就是这条。
   const b1 = await boot();
   await b1.call('roleplay_start', { name: '甲', persona: 'p甲' });
   await b1.call('roleplay_save_card', { name: '甲' }); // 显式存卡 → 全局库
-  const b2 = await boot('oc', null, '.roleplay-oc', b1.root);
+  const b2 = await boot('love', null, '.roleplay', b1.root);   // 第二个实例,同一个数据根
   let r = await b2.svc.listCards({ sessionId: 't-session' });
-  ok(r.ok && r.cards.some((c) => c.name === '甲'), 'OC 对话读到恋爱向存的卡(全局读)');
+  ok(r.ok && r.cards.some((c) => c.name === '甲'), '第二个实例读到第一个实例存的卡(全局读)');
   await b2.call('roleplay_start', { name: '乙', persona: 'p乙' });
   await b2.call('roleplay_save_card', { name: '乙' });
-  const b3 = await boot('friend', null, '.roleplay-friend', b1.root);
-  r = await b3.svc.listCards({ sessionId: 't-session' });
-  ok(r.ok && r.cards.some((c) => c.name === '甲') && r.cards.some((c) => c.name === '乙'), '朋友向读到 OC 存的卡(全局写)');
+  r = await b1.svc.listCards({ sessionId: 't-session' });
+  ok(r.ok && r.cards.some((c) => c.name === '乙'), '第一个实例读到第二个实例存的卡(全局写)');
   ok(r.ok && r.cards.length >= 2, '卡库不重复丢失');
   rmSync(b1.root, { recursive: true, force: true });
 }
-
-// ─── T18 房间按「卡 id」开启(侧栏传 id 的场景) ─────────────────
 console.log('\nT18 房间按卡 id 开启');
 {
   const b = await boot();
@@ -1814,10 +1779,7 @@ console.log('\nT48 聊天模式(只有台词)');
   const src = readFileSync(new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url), 'utf8');
   ok(/narrationMode === 'chat'/.test(src), '心跳提示词按 chat 模式分叉');
   ok(src.includes('当前是聊天模式：不要动作/神态/场景描写'), '心跳里明确「只发一句台词」');
-  for (const f of ['roleplay-friend', 'roleplay-oc']) {
-    const s = readFileSync(new URL('../agent-presets/' + f + '/roleplay-host.mjs', import.meta.url), 'utf8');
-    ok(s.includes("'chat'") && s.includes('（当前：聊天模式）'), f + ' 预设也支持聊天模式(下拉是共用的, 不能静默忽略)');
-  }
+  // 单预设时代：朋友向/OC 已删除，聊天模式只需上面 roleplay/roleplay-host.mjs 那两条断言
 }
 
 // ─── T49 隐藏消息不进对话侧栏（聊天模式的"每轮格式提醒"用 hidden 标记） ───
@@ -1839,6 +1801,159 @@ console.log('\nT49 隐藏消息');
   ok(hb && hb.hidden === false, '心跳消息仍然可见（设计上要在侧栏显示）');
   const visible = historyMessages(events, 10).filter((m) => !m.hidden);
   ok(visible.length === 1 && visible[0].id === 'rp-hb-1', '历史视图过滤后只剩心跳，格式提醒不出现');
+}
+
+// ─── T50 v1.5.29: 稳定版开关 —— 关掉必须是「真的不跑」 ───
+console.log('\nT50 稳定版开关(总开关 / 稳定模式)');
+{
+  const seed = { name: '爱花', persona: '安静' };
+  const svcOf = (vals) => ({ settings: { get: () => vals, describe: () => [], update: async () => {} } });
+  const intervalsOf = (b, ms) => b.captured.intervals.filter((x) => x.ms === ms);
+
+  // 1) 稳定模式:扮演照常,非核心子系统真停
+  {
+    const b = await boot('love', seed, '.roleplay', null, { services: svcOf({ stableMode: true }) });
+    ok(intervalsOf(b, 60000).length === 0, '稳定模式:心跳定时器未注册');
+    ok(!b.captured.tools.roleplay_game, '稳定模式:小游戏工具不注册');
+    ok(!b.captured.tools.roleplay_lore, '稳定模式:世界书工具不注册');
+    ok(!b.captured.tools.roleplay_import_char, '稳定模式:ST 导入工具不注册');
+    ok(b.captured.sections.length > 0, '稳定模式:扮演提示词照常注入(角色照演, 这是与总开关的区别)');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 2) 总开关:整个插件静默(行为等同卸载,但数据不动)
+  {
+    const b = await boot('love', seed, '.roleplay', null, { services: svcOf({ enabled: false }) });
+    ok(b.captured.sections.length === 0, '总开关:一段提示词都不注入(角色退回普通助手)');
+    ok(Object.keys(b.captured.tools).length === 0, '总开关:所有工具都不注册');
+    ok(intervalsOf(b, 60000).length === 0, '总开关:心跳定时器未注册');
+    ok(intervalsOf(b, 20000).length === 0, '总开关:20 秒扫描定时器未注册');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 3) 单项关闭:只停那一项, 其他不受影响
+  {
+    const b = await boot('love', seed, '.roleplay', null, { services: svcOf({ gameEnabled: false }) });
+    ok(!b.captured.tools.roleplay_game, '单项关闭:小游戏工具不注册');
+    ok(!!b.captured.tools.roleplay_lore, '单项关闭:世界书工具不受影响');
+    ok(intervalsOf(b, 60000).length === 1, '单项关闭:心跳照常注册');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 4) 运行期闸门:挂载后再关开关, 已注册的工具执行时必须立刻失效(审计发现的"注册是一次性"漏洞)
+  {
+    const b = await boot('love', seed, '.roleplay', null, { services: svcOf({ gameEnabled: true }) });
+    ok(!!b.captured.tools.roleplay_lore, '默认开启:世界书工具已注册');
+    ok(b.captured.tools.roleplay_lore.execute({ act: 'list' }) !== undefined, '默认开启:工具可执行');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+}
+
+
+// ─── T51 开关存储适配(0.1.1 设置命名空间 / 0.2.0 本地 JSON) ───
+console.log('\nT51 开关存储适配(0.1.1 命名空间 / 0.2.0 本地文件)');
+{
+  const STORE_URL = new URL('../agent-presets/roleplay/lib/switch-store.mjs', import.meta.url).href;
+  const { readSwitches, writeSwitches, ensureSwitchStore, SWITCH_DEFAULTS, switchFile } = await import(STORE_URL);
+  ok(Object.keys(SWITCH_DEFAULTS).length === 21, '默认值表 21 项(与 lib/settings.js 的 schema 对齐)');
+
+  // 0.1.1:命名空间版 settings(有 get/update)
+  const legacy = { get: () => ({ narrationMode: 'chat', statsEnabled: false }), update: async () => {} };
+  const ctxLegacy = { get: (n) => (n === 'settings' ? legacy : undefined) };
+  const r1 = readSwitches(ctxLegacy);
+  ok(r1.narrationMode === 'chat' && r1.statsEnabled === false, '0.1.1:命名空间里的用户值优先');
+  ok(r1.heartbeatEnabled === true && r1.enabled === true, '0.1.1:命名空间没写的项回落默认值');
+
+  const prevSw = process.env.DSH_ROLEPLAY_SWITCHES;
+  const prevHome = process.env.DSH_HOME;
+  const tmp = mkdtempSync(join(tmpdir(), 'rp-switch-'));
+  process.env.DSH_ROLEPLAY_SWITCHES = join(tmp, 'switches.json');
+
+  // 0.2.0:SettingsForms 只有 update/replace/describe/write,没有 get
+  let nsUpdateCalls = 0;
+  const ctxNew = { get: () => ({ update: async () => { nsUpdateCalls++; } }) };
+  const r2 = readSwitches(ctxNew);
+  ok(r2.enabled === true && r2.stableMode === false && r2.heartbeatMinutes === 30, '0.2.0:没有文件时回落默认值');
+  const saved = await writeSwitches(ctxNew, { stableMode: true, notesEnabled: false });
+  ok(saved.stableMode === true && saved.notesEnabled === false, '0.2.0:写入后返回值反映新值');
+  ok(nsUpdateCalls === 0, '0.2.0:只有 update() 没有 get() 时不走命名空间写(否则会污染 profile 补丁)');
+  ok(existsSync(switchFile()), '0.2.0:开关落盘为本地 JSON');
+  const onDisk = JSON.parse(readFileSync(switchFile(), 'utf8'));
+  ok(onDisk.stableMode === true && onDisk.notesEnabled === false && onDisk.enabled === undefined, '只落用户改过的键(不把默认值烤进文件)');
+  ok(readSwitches(ctxNew).stableMode === true, '0.2.0:重新读取生效');
+
+  const before = readFileSync(switchFile(), 'utf8');
+  await writeSwitches(ctxLegacy, { difficulty: 3 });
+  ok(readFileSync(switchFile(), 'utf8') === before, '0.1.1:写命名空间时不动本地文件(两套存储不串)');
+
+  // 一次性迁移:0.2.0 认不出 settings.yaml 的 roleplay 段,首次落地时从旧文档捞回
+  const tmpHome = mkdtempSync(join(tmpdir(), 'rp-home-'));
+  writeFileSync(join(tmpHome, 'settings.yaml.imported'), ['roleplay:', '  statsEnabled: false', '  narrationMode: chat', '  stableMode: true', '  heartbeatMinutes: 45', 'locale:', '  preference: zh', ''].join('\n'));
+  process.env.DSH_HOME = tmpHome;
+  process.env.DSH_ROLEPLAY_SWITCHES = join(tmpHome, 'switches.json');
+  const mig = readSwitches(ctxNew);
+  ok(mig.statsEnabled === false && mig.narrationMode === 'chat' && mig.stableMode === true && mig.heartbeatMinutes === 45, '迁移:没有本地文件时从 settings.yaml.imported 的 roleplay 段取用户值');
+  ok(mig.userProfileEnabled === true && mig.locale === undefined, '迁移:只认 roleplay 段且只认已知键(不串别的段)');
+  ok(!existsSync(join(tmpHome, 'switches.json')), '读路径绝不写盘(否则单测/预设宿主一读就污染用户 home)');
+  ok(ensureSwitchStore(ctxNew) === true, 'ensureSwitchStore:显式迁移返回 true');
+  ok(existsSync(join(tmpHome, 'switches.json')), 'ensureSwitchStore:迁移结果落盘');
+  ok(ensureSwitchStore(ctxNew) === false, 'ensureSwitchStore:已有文件时不重复迁移(幂等)');
+
+  if (prevSw === undefined) delete process.env.DSH_ROLEPLAY_SWITCHES; else process.env.DSH_ROLEPLAY_SWITCHES = prevSw;
+  if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome;
+  rmSync(tmp, { recursive: true, force: true });
+  rmSync(tmpHome, { recursive: true, force: true });
+}
+
+// ─── T52 角色预设注册(0.2.0 agentPresets.register / 0.1.1 不动) ───
+console.log('\nT52 角色预设注册(0.2.0 服务登记 / 0.1.1 继续吃目录)');
+{
+  const REG_URL = new URL('../lib/preset-registration.mjs', import.meta.url).href;
+  const { registerAgentPresets, PRESET_NAMES } = await import(REG_URL);
+  const seen = [];
+  let injected = null;
+  let listed = 0;
+  const svc = {
+    register: (def) => { seen.push(def); return Promise.resolve(() => {}) },
+    list: async () => { listed++; return [] },
+  };
+  registerAgentPresets({
+    inject: (deps, cb) => { injected = deps; cb({ get: (n) => (n === 'agentPresets' ? svc : undefined) }) },
+  });
+  await new Promise((r) => setTimeout(r, 80));
+  ok(Array.isArray(injected) && injected[0] === 'agentPresets', '先 inject agentPresets(不阻塞 0.1.1 的挂载)');
+  ok(PRESET_NAMES.length === 1 && PRESET_NAMES[0] === 'roleplay', '只剩一份预设(朋友向/OC 已删)');
+  ok(seen.length === 1 && seen[0].id === 'roleplay', '只注册 roleplay(会话里存的就是这个 id)');
+  const one = seen[0];
+  ok(one.plugins.length === 1 && one.plugins[0].name === 'cordis:include', '组合树走 cordis:include(组合文件不内联进代码)');
+  const p = one.plugins[0].config.path;
+  ok(typeof p === 'string' && p.startsWith('file://'), 'include 的 path 是绝对 file:// URL(不受 baseUrl 影响)');
+  ok(p.indexOf('/agent-presets/roleplay/agent.cordis.0.2.yml') > 0, '0.2.0 用专用组合文件 agent.cordis.0.2.yml(0.1.1 那份字段不兼容)');
+  ok(one.name === '恋爱向', 'name 取自 preset.yml');
+  ok(typeof one.description === 'string' && one.description.length > 10, 'description 取自 preset.yml');
+  ok(typeof one.order === 'number', 'order 是数字(roster 排序用)');
+  ok(listed === 1, '注册后会自检一次 roster(挂载失败时 register() 仍会 resolve,必须单独查)');
+  let threw = false;
+  try { registerAgentPresets({ inject: (d, cb) => cb({ get: () => undefined }) }) } catch (e) { threw = true }
+  ok(!threw, '服务缺席时安静跳过(0.1.1 不报错、不改变目录扫描行为)');
+  let threw2 = false;
+  try { registerAgentPresets({ inject: (d, cb) => cb({ get: () => ({ list: () => [] }) }) }) } catch (e) { threw2 = true }
+  ok(!threw2, '服务没有 register() 时安静跳过(实测 0.1.1 的 agentPresets 就是这种)');
+}
+
+// ─── T56 0.2.0 组合文件与 0.1.1 那份的差异(挂载被拒的真凶,防回归) ───
+console.log('\nT56 0.2.0 组合文件字段兼容性');
+{
+  const R = fileURLToPath(new URL('../agent-presets/roleplay/', import.meta.url));
+  const modern = readFileSync(join(R, 'agent.cordis.0.2.yml'), 'utf8');
+  const legacy = readFileSync(join(R, 'agent.cordis.yml'), 'utf8');
+  ok(/^\s+prefix: \|-/m.test(modern), '0.2.0 的 persona 用 prefix(必填;写成 text 会报 $.prefix missing required value)');
+  ok(!/^\s+text: /m.test(modern), '0.2.0 那份里没有旧的 text: 字段');
+  ok(modern.indexOf('@deepseek-ai/dsh-workflow-ptc') > 0, '0.2.0 用 dsh-workflow-ptc');
+  ok(modern.indexOf('worker-thread') < 0 || !/name: '@deepseek-ai\/dsh-workflow-worker-thread'/.test(modern), '0.2.0 不再引用已移除的 dsh-workflow-worker-thread');
+  ok(/^\s+text: \|-/m.test(legacy), '0.1.1 那份仍然用 text(那条路不受影响)');
+  ok(/name: '@deepseek-ai\/dsh-workflow-worker-thread'/.test(legacy), '0.1.1 仍然引用 worker-thread(0.1.1 里它还在)');
+  ok(/- id: roleplay$/m.test(modern) && /name: '\.\/roleplay-host\.mjs/.test(modern), '两份都挂着同一个 roleplay 宿主行');
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); annotate('共 ' + FAIL + ' 条断言失败: ' + failures.slice(0, 12).join(' / ')); process.exit(1); }

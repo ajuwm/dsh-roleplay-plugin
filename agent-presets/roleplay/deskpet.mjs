@@ -4,6 +4,7 @@
 // ES 模块(.mjs): 包内"type":"module"与物化目录(无 package.json)两种上下文均按 ESM 加载。
 import os from 'node:os'
 import path from 'node:path'
+import { readSwitches } from './lib/switch-store.mjs'
 
 export default {
   name: 'deskpet',
@@ -197,6 +198,18 @@ export default {
       if (last && typeof last.seq === 'number') req.collectedThrough = last.seq
     }
 
+    // 稳定版:桌宠受角色扮演插件的设置管辖(总开关 / 稳定模式 / deskpetEnabled)。
+    // 只影响「起停判断」,不写 pet/config.json —— 数据一个字不动,开回来立刻恢复。
+    function roleplayDeskpetOff() {
+      try {
+        // 0.1.1 读设置命名空间 / 0.2.0 读 $DSH_HOME/.roleplay-switches.json（见 switch-store）
+        const v = readSwitches(ctx)
+        if (v.enabled === false) return true
+        if (v.stableMode === true || v.deskpetEnabled === false) return true
+      } catch (e) { /* 读不到就照常启动 */ }
+      return false
+    }
+
     // 配置监视：config.json 的 enabled 驱动窗口起停（侧栏按钮 / 手动改文件均生效）。
     // 配置监视：config.json 的 enabled 驱动窗口起停（侧栏按钮 / 手动改文件均生效）。
     // 注意：配置缺失/损坏时【默认启用】并继续尝试启动（与“启动中…卡死”问题一致——
@@ -213,8 +226,9 @@ export default {
         const raw = await fs.readText(target)
         cfg = JSON.parse(raw || '{}')
       } catch (e) { console.error('[deskpet] config unreadable, start with defaults', e && e.message) }
-      const enabled = cfg && typeof cfg.enabled === 'boolean' ? cfg.enabled : true
-      const notes = cfg && typeof cfg.noteEnabled === 'boolean' ? cfg.noteEnabled : true
+      const rpOff = roleplayDeskpetOff()
+      const enabled = (cfg && typeof cfg.enabled === 'boolean' ? cfg.enabled : true) && !rpOff
+      const notes = (cfg && typeof cfg.noteEnabled === 'boolean' ? cfg.noteEnabled : true) && !rpOff
       petEnabled = enabled
       noteEnabled = notes
       if (petEnabled && !petProc) {

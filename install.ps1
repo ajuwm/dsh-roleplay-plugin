@@ -1,4 +1,4 @@
-# DSH 角色扮演插件 · 一键安装/卸载脚本
+﻿# DSH 角色扮演插件 · 一键安装/卸载脚本
 # 用法:
 #   pwsh install.ps1                     # 安装(可选 -Default 设为默认预设, -Workspace <路径> 指定 DSH 工作区)
 #   pwsh install.ps1 -Uninstall          # 卸载(撤销本脚本加的东西; -Presets 一并删除预设目录, -Pet 一并删除桌宠数据)
@@ -9,14 +9,22 @@ param(
   [switch]$Uninstall,
   [string]$Workspace = '',
   [switch]$Presets,
-  [switch]$Pet
+  [switch]$Pet,
+  [string]$DshProfile = ''   # web = CLI 版 / desktop = 官方桌面版;留空自动挑
 )
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $presetRoot = Join-Path $dshHome '.agent-presets'
-$profileDir = Join-Path $dshHome 'profiles\web'
+# CLI 版 dsh 用 profiles/web,官方桌面版用 profiles/desktop —— 留空则自动挑已存在的那个
+if (-not $DshProfile) {
+  $hasWeb = Test-Path (Join-Path (Join-Path $dshHome 'profiles') 'web')
+  $hasDesktop = Test-Path (Join-Path (Join-Path $dshHome 'profiles') 'desktop')
+  if ($hasDesktop -and -not $hasWeb) { $DshProfile = 'desktop' } else { $DshProfile = 'web' }
+}
+$profileDir = Join-Path (Join-Path $dshHome 'profiles') $DshProfile
+Write-Host ("[roleplay] 目标 DSH profile: " + $DshProfile)
 $clientDir = Join-Path $profileDir 'node_modules\@ajuwm\dsh-roleplay-plugin'
 $legacyClient = Join-Path $profileDir 'node_modules\@dsh-user\roleplay-client'
 $patchFile = Join-Path $profileDir 'cordis.patch.yml'
@@ -28,7 +36,7 @@ function Write-Step($msg) { Write-Host ("[roleplay] " + $msg) }
 function Install-Presets {
   Write-Step '放置角色扮演预设 (恋爱向/朋友向/OC 原创向)...'
   New-Item -ItemType Directory -Force -Path $presetRoot | Out-Null
-  foreach ($p in @('roleplay', 'roleplay-friend', 'roleplay-oc')) {
+  foreach ($p in @('roleplay')) {
     $src = Join-Path $root "agent-presets\$p"
     if (Test-Path $src) {
       $dst = Join-Path $presetRoot $p
@@ -138,7 +146,7 @@ function Uninstall-All {
   }
   if (Test-Path $clientDir) { Remove-Item $clientDir -Recurse -Force; Write-Step '  roleplay-client 已删除' }
   if ($Presets) {
-    foreach ($p in @('roleplay', 'roleplay-friend', 'roleplay-oc')) {
+    foreach ($p in @('roleplay')) {
       $dst = Join-Path $presetRoot $p
       if (Test-Path $dst) { Remove-Item $dst -Recurse -Force; Write-Step "  预设 $p 已删除" }
     }
