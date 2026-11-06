@@ -2,6 +2,22 @@
 
 本插件变更记录（版本遵循语义化：hotfix=patch / 新功能=minor / 大改=major，一次性修复集并入当次版本）。
 
+## [1.6.1] - 修桌面版侧栏缩到右下角（只占内容高度）
+
+**症状**：DSH 桌面版里，角色扮演侧栏（和对话窗）不再从顶部撑到底部，只剩内容高度贴在屏幕右下角。
+
+**根因**：
+- 侧栏/对话窗的定位是 `position:fixed; top:0; right:0; bottom:0`，其中 `top` 被一条“给原生标题栏让位”的规则覆盖成
+  `top: var(--dsh-frame-top-clearance, 0px)`。
+- Windows 桌面版里 `--dsh-frame-top-clearance` 又被定义为 `var(--dsh-windows-titlebar-height)`，而后者是 JS **事后**写进 `<html>` 的内联样式。
+- 在它写入之前，`--dsh-frame-top-clearance` 是 **“保证无效值”（guaranteed-invalid）**：此时 `var()` 的兜底**不会生效**，
+  该声明在计算值阶段失效 → `top` 退化成 `auto` → 面板高度塌成内容高度，于是贴到底部。
+
+**修法**：
+- 基础规则先给 `.rp-sb, .rp-chat { top: 0; }`；
+- 让位逻辑改成直接读 `--dsh-windows-titlebar-height`（未定义时 `var()` 会正常用兜底 0px）：
+  `html[data-windows-titlebar] .rp-sb, html[data-windows-titlebar] .rp-chat { top: var(--dsh-windows-titlebar-height, 0px); }`。
+- 不再依赖会被“保证无效”污染的外层变量。
 ## [1.6.0] - 记忆自动召回 + 标签权重 + 兼容 DSH 0.2.2
 
 这一版的主题是**记忆**：从「模型想起来才查」改成「宿主每轮自动挑 8 条注入」，并适配 DSH 0.2.2 的提示词变量收紧。
