@@ -123,6 +123,34 @@ export default {
       }, 150000)
     }
 
+    // ⚠️ 消息 source 契约(2026-10-06 实测踩到):
+    //   DSH 0.2.0 起会话格式升到 v4,source 必须是**产者自有 kind** —— {kind:'plugin:deskpet'};
+    //   写成 v3 的 {kind:'plugin', plugin:'roleplay'} 会被直接拒:
+    //     "format v4 message requires a producer-owned source kind" → **整轮失败**。
+    //   0.1.1 是 v3,v4 形状在那边不认 —— 所以必须按版本给,不能写死。
+    //   判据:agentPresets 是 0.2.0 才有的服务;退回再看设置服务是否已无 register/get 能力。
+    let modernSourceFormat = null
+    function isModernFormat() {
+      if (modernSourceFormat !== null) return modernSourceFormat
+      let v = false
+      // ⚠️ 不能只看「agentPresets 存不存在」—— 0.1.1 也有这个服务，只是**没有 register**。
+      // 判据必须与 preset-registration.mjs 一致:有 register() 才是 0.2.0。
+      try { if (globalThis.__RP_DSH_MODERN === true) v = true } catch (e) { /* 忽略 */ }
+      if (!v) {
+        try { const ap = ctx.get('agentPresets'); if (ap && typeof ap.register === 'function') v = true } catch (e) { /* 忽略 */ }
+      }
+      if (!v) {
+        try {
+          const s = ctx.get('settings')
+          if (s && typeof s.register !== 'function' && typeof s.get !== 'function') v = true
+        } catch (e) { /* 忽略 */ }
+      }
+      modernSourceFormat = v
+      return v
+    }
+    function petSource() {
+      return isModernFormat() ? { kind: 'plugin:deskpet' } : { kind: 'plugin', plugin: 'deskpet' }
+    }
     function sendPetMessage(text, reqId) {
       if (!targetSessionId) return { ok: false, error: 'no-session' }
       const agent = agents.get(targetSessionId)
@@ -133,7 +161,7 @@ export default {
         id,
         role: 'user',
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: 'deskpet' },
+        source: petSource(),
       }
       try {
         agent.send(message, 'next-turn', true)

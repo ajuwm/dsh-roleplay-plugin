@@ -28,6 +28,9 @@ export const SWITCH_DEFAULTS = {
   stImportEnabled: true,
   backupEnabled: true,
   desktopLookEnabled: true,
+  stateSlotEnabled: true,
+  // 压缩方式:'official' = 官方原样(默认) / 'roleplay' = 官方 + 我们的中文第一人称续接
+  compactionMode: 'official',
   // ── 原有偏好 ──
   heartbeatMinutes: 30,
   narrationMode: 'novel',
@@ -142,6 +145,19 @@ export function readSwitches(ctx) {
   const migrated = legacyDocumentValues()
   if (migrated !== null) return Object.assign({}, SWITCH_DEFAULTS, migrated)
   return Object.assign({}, SWITCH_DEFAULTS)
+}
+
+// 只读「用户显式写过的值」——**不含默认值**。
+// 用途:面板(settings-write)把开关写进这里，而 state.settings 是另一半(设置卡片)写的。
+// 两边要合流时，必须能分清「用户写过」和「默认值」——readSwitches() 合并了默认值,
+// 拿它当覆盖源会把用户设置整个刷成默认(踩过:relPace 慢热被刷回 normal)。
+// 返回 null 表示「用户从没写过」。
+export function readStoredSwitches(ctx) {
+  const legacy = legacyValues(ctx)
+  if (legacy !== null) return legacy
+  const file = fileValues()
+  if (file !== null) return file
+  return legacyDocumentValues()
 }
 
 // 显式迁移（只在宿主半边 apply 时调一次）：把旧设置文档里的 roleplay 段

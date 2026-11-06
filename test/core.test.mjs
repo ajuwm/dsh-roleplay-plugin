@@ -12,6 +12,10 @@ import { spawnSync } from 'node:child_process';
 // 单测绝不允许读到或写到用户真实 home（踩过一次：T50 的读路径把迁移结果写进了真实 %DSH_HOME%）。
 // 在任何模块加载前把它指到临时目录。
 process.env.DSH_ROLEPLAY_SWITCHES = join(mkdtempSync(join(tmpdir(), 'rp-switch-iso-')), 'switches.json');
+// ⚠️ DSH_HOME 也必须隔离:switch-store 的一次性迁移会去读 %DSH_HOME%/settings.yaml(.imported),
+// 那是**用户真实**的 0.1.1 设置文档 —— 不隔离的话它会把用户偏好(storyEnabled:false 等)搬进测试,
+// 表现为「测试受本机配置影响」的假失败(2026-10-07 踩到:T22 因为用户关了剧情档案而挂)。
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'rp-home-iso-'));
 
 const ENGINE_URL = new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url).href;
 
@@ -43,11 +47,15 @@ console.log('\nT0 语法门 (全部 JS/MJS)');
     'agent-presets/roleplay/lib/rel-tier-core.mjs',
     'agent-presets/roleplay/lib/backup-core.mjs',
     'agent-presets/roleplay/lib/switch-store.mjs',
+    'agent-presets/roleplay/lib/state-slot.mjs',
+    'agent-presets/roleplay/lib/compaction-anchor.mjs',
+    'agent-presets/roleplay/lib/history-core.mjs',
     'agent-presets/roleplay/deskpet.mjs',
     'lib/index.js',
     'lib/client.js',
     'lib/settings.js',
     'lib/preset-registration.mjs',
+    'lib/compaction.mjs',
   ];
   const root = fileURLToPath(new URL('..', import.meta.url));
   let bad = 0;
@@ -607,11 +615,11 @@ console.log('\nT22 剧情档案');
   await b.call('roleplay_remember', { event: '一起去美术馆', kind: '一起活动' });
   const ra = await b.call('roleplay_story', { action: 'archive', title: '美术馆之约', outline: '第一次一起出门，她有点紧张', content: '她站在门前等了十分钟才抬脚…', summary: '美术馆之约，气氛升温' });
   ok(ra && ra.ok === true && ra.chapter === 1, 'archive: 第一章存档成功');
-  let body = readFileSync(join(root, '.roleplay', 'story', 'story.md'), 'utf8');
+  let body = readFileSync(join(root, '.roleplay', 'story', '甲-story.md'), 'utf8');
   ok(body.includes('## 美术馆之约') && body.includes('她站在门前等了十分钟'), 'story.md 含章节标题与正文');
-  const idx = JSON.parse(readFileSync(join(root, '.roleplay', 'story', 'index.json'), 'utf8'));
+  const idx = JSON.parse(readFileSync(join(root, '.roleplay', 'story', '甲-index.json'), 'utf8'));
   ok(idx.chapters.length === 1 && idx.latest.title === '美术馆之约', 'index.json 目录与最新进展');
-  const chars = readFileSync(join(root, '.roleplay', 'story', 'characters.md'), 'utf8');
+  const chars = readFileSync(join(root, '.roleplay', 'story', '甲-characters.md'), 'utf8');
   ok(chars.includes('甲'), 'characters.md 含角色');
   const rl = await b.call('roleplay_story', { action: 'list' });
   ok(rl && rl.chapters && rl.chapters.length === 1, 'list 返回章节目录');
@@ -999,7 +1007,16 @@ console.log('\nT37 小游戏');
   ok(G.twentyGuess(wd, '苹果') === true && G.twentyGuess(wd, '大苹果') === false && G.twentyGuess(wd, '梨') === false, '猜词命中(全匹配含≥2字)/不匹配');
   // 真心话
   ok(G.truthTierOf('special') === 3 && G.truthTierOf('close_friend') === 2 && G.truthTierOf('stranger') === 1, '关系档位→题库档');
-  const tr = G.truthDraw(3, 0, () => 0);
+  const tr = G.truthDraw(3, 0, 'truth', () => 0);
+  // 2026-10-07 实测反馈修的两条:
+  const truths = []; const dares = [];
+  for (let k = 0; k < 24; k++) {
+    truths.push(G.truthDraw(2, k, 'truth').kind);
+    dares.push(G.truthDraw(2, k, 'dare').kind);
+  }
+  ok(truths.every((x) => x === 'truth'), '选「真心话」只会抽到真心话(以前整池随机,会抽到大冒险)');
+  ok(dares.every((x) => x === 'dare'), '选「大冒险」只会抽到大冒险');
+  ok(G.truthDraw(2, 0, 'truth', () => 0, '你最喜欢我做的哪一件事?').text !== '你最喜欢我做的哪一件事?', 'avoid 生效:不连着出同一题');
   ok(tr && tr.text && (tr.kind === 'truth' || tr.kind === 'dare'), '抽题有效');
   // 引擎集成: start 注入开场, state 不泄密, quit 清空
   const b = await boot();
@@ -1777,7 +1794,7 @@ console.log('\nT48 聊天模式(只有台词)');
 {
   // 心跳文案分叉: 直接检查引擎源码(心跳提示词是运行时按模式拼的, 单测在进程内拿不到内部数组)
   const src = readFileSync(new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url), 'utf8');
-  ok(/narrationMode === 'chat'/.test(src), '心跳提示词按 chat 模式分叉');
+  ok(/isChatMode\(\)/.test(src) && /function isChatMode\(\)/.test(src), '心跳提示词按 chat 模式分叉(统一走 isChatMode())');
   ok(src.includes('当前是聊天模式：不要动作/神态/场景描写'), '心跳里明确「只发一句台词」');
   // 单预设时代：朋友向/OC 已删除，聊天模式只需上面 roleplay/roleplay-host.mjs 那两条断言
 }
@@ -1855,7 +1872,7 @@ console.log('\nT51 开关存储适配(0.1.1 命名空间 / 0.2.0 本地文件)')
 {
   const STORE_URL = new URL('../agent-presets/roleplay/lib/switch-store.mjs', import.meta.url).href;
   const { readSwitches, writeSwitches, ensureSwitchStore, SWITCH_DEFAULTS, switchFile } = await import(STORE_URL);
-  ok(Object.keys(SWITCH_DEFAULTS).length === 21, '默认值表 21 项(与 lib/settings.js 的 schema 对齐)');
+  ok(Object.keys(SWITCH_DEFAULTS).length === 23, '默认值表 23 项(与 lib/settings.js 的 schema 对齐)');
 
   // 0.1.1:命名空间版 settings(有 get/update)
   const legacy = { get: () => ({ narrationMode: 'chat', statsEnabled: false }), update: async () => {} };
@@ -1929,7 +1946,7 @@ console.log('\nT52 角色预设注册(0.2.0 服务登记 / 0.1.1 继续吃目录
   const p = one.plugins[0].config.path;
   ok(typeof p === 'string' && p.startsWith('file://'), 'include 的 path 是绝对 file:// URL(不受 baseUrl 影响)');
   ok(p.indexOf('/agent-presets/roleplay/agent.cordis.0.2.yml') > 0, '0.2.0 用专用组合文件 agent.cordis.0.2.yml(0.1.1 那份字段不兼容)');
-  ok(one.name === '恋爱向', 'name 取自 preset.yml');
+  ok(one.name === 'roleplay', 'name 取自 preset.yml(显示名就是 id,不再叫「恋爱向」)');
   ok(typeof one.description === 'string' && one.description.length > 10, 'description 取自 preset.yml');
   ok(typeof one.order === 'number', 'order 是数字(roster 排序用)');
   ok(listed === 1, '注册后会自检一次 roster(挂载失败时 register() 仍会 resolve,必须单独查)');
@@ -1950,10 +1967,667 @@ console.log('\nT56 0.2.0 组合文件字段兼容性');
   ok(/^\s+prefix: \|-/m.test(modern), '0.2.0 的 persona 用 prefix(必填;写成 text 会报 $.prefix missing required value)');
   ok(!/^\s+text: /m.test(modern), '0.2.0 那份里没有旧的 text: 字段');
   ok(modern.indexOf('@deepseek-ai/dsh-workflow-ptc') > 0, '0.2.0 用 dsh-workflow-ptc');
+  // 压缩阈值:官方默认 0.8 对扮演太晚(单次压得狠、长局撑得久);调到 0.6,配合压缩锚点 + 原文回查
+  ok(/thresholdRatio:\s*0\.6/.test(modern), 'compaction-basic 用 thresholdRatio 0.6(更早压)');
   ok(modern.indexOf('worker-thread') < 0 || !/name: '@deepseek-ai\/dsh-workflow-worker-thread'/.test(modern), '0.2.0 不再引用已移除的 dsh-workflow-worker-thread');
   ok(/^\s+text: \|-/m.test(legacy), '0.1.1 那份仍然用 text(那条路不受影响)');
   ok(/name: '@deepseek-ai\/dsh-workflow-worker-thread'/.test(legacy), '0.1.1 仍然引用 worker-thread(0.1.1 里它还在)');
   ok(/- id: roleplay$/m.test(modern) && /name: '\.\/roleplay-host\.mjs/.test(modern), '两份都挂着同一个 roleplay 宿主行');
+}
+
+
+// ─── T53 角色状态槽(每轮重建的短视图) ───
+console.log('\nT53 角色状态槽');
+{
+  const seedMem = (root) => writeFileSync(join(root, '.roleplay', 'mem-爱花.json'), JSON.stringify({
+    short_term: [
+      { event: '他熬夜到凌晨四点，我把灯按灭、赶他去睡，说明早的粥我来熬', subject: '关心对方' },
+      { event: '他把「现在四点」说成下午四点，我误当成凌晨训了他一通，反被当场拆穿', subject: '被调侃' },
+    ],
+    unspoken: [{ text: '想找个由头约他傍晚出去走走——就说做点心缺糖' }],
+  }));
+  const slotOf = (b) => b.captured.sections.find((s) => s.name === 'roleplay.state-slot');
+  const svcOf = (vals) => ({ settings: { get: () => vals, describe: () => [], update: async () => {} } });
+
+  // 1) 默认开:六行结构 + 第一人称 + 隐身声明 + 预算
+  {
+    const b = await boot('love', null, '.roleplay', null, { services: svcOf({}) });
+    seedMem(b.root);
+    await b.call('roleplay_start', { name: '爱花', persona: '安静的女孩子，话少。' });
+    const sec = slotOf(b);
+    ok(!!sec, '注册了 roleplay.state-slot 段落');
+    ok(sec.order === 985, 'order 985(紧跟 chat-contract 990 之前,靠上下文末尾)');
+    const txt = sec.text();
+    ok(txt.indexOf('【我此刻是谁】') === 0 && txt.indexOf('爱花') > 0, '第一行是「我此刻是谁」且带角色名(第一人称)');
+    ok(txt.indexOf('隐身') > 0, '带隐身声明(防止模型把内心独白当输出)');
+    ok(txt.length <= 600, '字数在预算内:' + txt.length + ' ≤ 600');
+    ok(txt.indexOf('【我记得的】') > 0 || txt.indexOf('【我和他】') > 0, '至少带一行状态(记忆或关系)');
+    const d = await b.gs({});
+    ok(d && d.stateSlot && d.stateSlot.chars === txt.length, 'getState 暴露状态槽全文与字数(侧栏要显示)');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 2) 单开关关掉 → 一段空文本(不是整段不注册)
+  {
+    const b = await boot('love', null, '.roleplay', null, { services: svcOf({ stateSlotEnabled: false }) });
+    await b.call('roleplay_start', { name: '爱花', persona: '安静' });
+    ok(slotOf(b).text() === '', 'stateSlotEnabled=false → 状态槽为空');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 3) 稳定模式**不关**状态槽(它属于扮演核心,稳定模式关的是心跳/桌宠这类非核心子系统)
+  {
+    const b = await boot('love', null, '.roleplay', null, { services: svcOf({ stableMode: true }) });
+    await b.call('roleplay_start', { name: '爱花', persona: '安静' });
+    ok(slotOf(b).text().length > 0, '稳定模式:状态槽照常在(与心跳/桌宠的处理不同)');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 4) 总开关关掉 → 整个段落都不注册
+  {
+    const b = await boot('love', null, '.roleplay', null, { services: svcOf({ enabled: false }) });
+    ok(slotOf(b) === undefined, '总开关关掉 → roleplay.state-slot 不注册');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+
+  // 5) 纯函数:预算降级顺序 + 永不砍的行
+  {
+    const M = await import(new URL('../agent-presets/roleplay/lib/state-slot.mjs', import.meta.url).href);
+    const long = ['【我此刻是谁】我是X。', '【眼下的场面】' + 'S'.repeat(200), '【我和他】好感 1(a)。',
+      '【我记得的】① ' + 'M'.repeat(80) + '；② ' + 'M'.repeat(80) + '；③ ' + 'M'.repeat(80) + '。',
+      '【我现在想】' + 'U'.repeat(120), '【我不会】绝不背叛。', M.SLOT_HIDDEN_NOTE].join('\n');
+    const clamped = M.clampStateSlot(long);
+    ok(clamped.length <= 600, 'clampStateSlot 把 ' + long.length + ' 字压回 ' + clamped.length + ' 字');
+    ok(clamped.indexOf('【我不会】') > 0, '降级时【我不会】永不砍');
+    ok(clamped.indexOf('隐身') > 0, '降级时隐身声明永不砍');
+    ok(M.memoryIndex('他熬夜到凌晨四点，我把灯按灭、赶他去睡，说明早的粥我来熬').length <= 34, '记忆索引压成一句(不抄原文)');
+    const s = M.buildStateSlot({ name: '爱花', periodLabel: '下午', relation: { favor: 35, trust: 13, heart: 10 }, tierLabels: { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] }, idleDays: 21, idleLabel: '9 月 13 日', memories: [], unspoken: [], neverDo: [] });
+    ok(s.indexOf('亲近') > 0 && s.indexOf('戒备') > 0 && s.indexOf('21 天没露面') > 0, '档位标签与「多久没来」都进了槽');
+    ok(M.buildStateSlot({ name: 'X' }).indexOf('【我和他】') < 0, '没数据的行整行不出现(不写空壳)');
+  }
+}
+
+
+// ─── T54 压缩锚点(纯函数) ───
+console.log('\nT54 压缩锚点');
+{
+  const M = await import(new URL('../agent-presets/roleplay/lib/compaction-anchor.mjs', import.meta.url).href);
+  const tiers = { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] };
+  const full = M.buildCompactionAnchor({
+    relation: { favor: 35, trust: 13, heart: 10 }, tierLabels: tiers,
+    idleDays: 21, idleLabel: '9月13日',
+    memories: ['他熬夜到四点，我赶他去睡', '他把四点误说成下午', '他让我认真评价降价'],
+    unspoken: ['想找个由头约他傍晚出去走走'],
+    longTerm: ['我们第一次对话，他邀请我一起扮演'],
+    recentActs: ['开始了新的扮演'], anniversary: '10-24 第一次见面', goal: '攒钱买「星穹挂坠」——还差 60 金币',
+    chapter: '第一章 数据之海',
+  });
+  ok(full.indexOf('【那段时间,我记得的是】') === 0, '首行是锚点标题');
+  ok(full.split('\n')[0].indexOf('【那段时间,我记得的是】') === 0 && full.split('\n')[0].indexOf('复述') > 0, '首行是完整标题行(不跟正文粘在一起)');
+  ok(full.indexOf('21 天没露面') > 0, '带「多久没露面」——压缩后最容易丢的时间感');
+  ok(full.indexOf('亲近') > 0 && full.indexOf('戒备') > 0, '关系数值带档位标签');
+  ok(full.indexOf('一直没说的') > 0, '带「没说出口的」(压缩里最贵的连续性资产)');
+  ok(full.indexOf('①②③'.slice(0, 1)) > 0, '记忆是索引式(①②③)');
+  ok(full.length <= M.ANCHOR_MAX, '字数在预算内:' + full.length + ' ≤ ' + M.ANCHOR_MAX);
+  ok(full.indexOf('；；') < 0 && full.indexOf('，。') < 0, '没有「；；」「，。」这种拼接残留');
+  ok(M.buildCompactionAnchor({}) === '', '一条数据都没有 → 空串(不塞只有标题的空壳)');
+  const dup = M.buildCompactionAnchor({ recentActs: ['开始了新的扮演', '开始了新的扮演'], memories: [], unspoken: [] });
+  ok(dup.split('开始了新的扮演').length - 1 === 1, '重复的行为去重');
+  const long = M.buildCompactionAnchor({
+    relation: { favor: 50, trust: 50, heart: 50 }, tierLabels: tiers, idleDays: 5, idleLabel: '9月1日',
+    memories: ['M'.repeat(60), 'M'.repeat(60), 'M'.repeat(60)], unspoken: ['U'.repeat(200)],
+    longTerm: ['L'.repeat(60), 'L'.repeat(60)], recentActs: ['A'.repeat(50)],
+    anniversary: 'N'.repeat(80), goal: 'G'.repeat(80), chapter: 'C'.repeat(200),
+  });
+  ok(long.length <= M.ANCHOR_MAX, '超长输入被压回预算内:' + long.length);
+  ok(long.indexOf('一直没说的') > 0, '降级时「一直没说的」永不砍');
+}
+
+// ─── T57 压缩模式包装(我们的行包住官方后端) ───
+console.log('\nT57 压缩模式包装');
+{
+  const MOD = await import(new URL('../lib/compaction.mjs', import.meta.url).href);
+  // 与生产一致:官方 backend 的 regionDependencies 在**原型**上
+  class FakeEngine { regionDependencies() { return { meter: null, summarize: async () => ({ summary: [{ type: 'text', text: 'OFFICIAL' }] }) } } }
+  const mkEngine = () => new FakeEngine();
+  // 变体:万一以后官方改成「自有属性」,卸载时也不能把方法删没
+  const mkOwnEngine = () => ({ regionDependencies() { return { meter: null, summarize: async () => ({ summary: [{ type: 'text', text: 'OFFICIAL' }] }) } } });
+  const disposers = [];
+  const mkCtx = (engine, switches) => ({
+    compaction: engine,
+    get: (n) => (n === 'settings' ? { get: () => switches, describe: () => [], update: async () => {} } : undefined),
+    // 真 effect 的契约:调用回调,把返回的函数登记为 disposer
+    effect: (fn) => { const d = fn(); if (typeof d === 'function') disposers.push(d) },
+  });
+  const root = mkdtempSync(join(tmpdir(), 'rp-compact-'));
+  const dr = join(root, '.roleplay');
+  mkdirSync(dr, { recursive: true });
+  writeFileSync(join(dr, 'character.json'), JSON.stringify({ character: { name: '爱花' }, lastSeen: Date.now() - 3 * 86400000 }));
+  writeFileSync(join(dr, 'progress-爱花.json'), JSON.stringify({ relation: { favor: 40, trust: 30, heart: 20 }, recentActs: [{ act: '开始了新的扮演' }] }));
+  writeFileSync(join(dr, 'mem-爱花.json'), JSON.stringify({ short_term: [{ event: '他熬夜到四点，我赶他去睡' }], long_term: [], unspoken: [{ text: '想约他傍晚出去走走' }] }));
+  const agent = { session: { header: { cwd: root } } };
+
+  // 1) 官方模式:原样透传(与今天零差异)
+  {
+    const e = mkEngine();
+    MOD.apply(mkCtx(e, { compactionMode: 'official' }), { dataRoot: '.roleplay' });
+    const out = await e.regionDependencies().summarize({ messages: [] }, agent, undefined);
+    ok(out.summary.length === 1 && out.summary[0].text === 'OFFICIAL', '官方模式:摘要原样透传,不加任何东西');
+  }
+  // 2) 角色扮演模式:摘要最前面多一块锚点
+  {
+    const e = mkEngine();
+    MOD.apply(mkCtx(e, { compactionMode: 'roleplay' }), { dataRoot: '.roleplay' });
+    const out = await e.regionDependencies().summarize({ messages: [] }, agent, undefined);
+    ok(out.summary.length === 2 && out.summary[0].text.indexOf('【那段时间,我记得的是】') === 0, '角色扮演模式:锚点插在摘要最前面');
+    ok(out.summary[1].text === 'OFFICIAL', '官方摘要仍在(事实兜底不丢)');
+    ok(out.summary[0].text.indexOf('爱花') < 0 && out.summary[0].text.indexOf('好感 40') > 0, '锚点带关系数值');
+  }
+  // 3) 版本不符:官方后端没有那个方法 → 不抛、不包装
+  {
+    let threw = false;
+    const e = { regionDependencies: undefined };
+    try { MOD.apply(mkCtx(e, { compactionMode: 'roleplay' }), {}); } catch (err) { threw = true }
+    ok(!threw && typeof e.regionDependencies === 'undefined', '官方后端没有 regionDependencies → 安静跳过(版本不符不炸)');
+  }
+  // 4) 没有角色数据 → 放行官方摘要(不能因为读不到存档就把压缩弄挂)
+  {
+    const e = mkEngine();
+    MOD.apply(mkCtx(e, { compactionMode: 'roleplay' }), { dataRoot: '.roleplay' });
+    const out = await e.regionDependencies().summarize({ messages: [] }, { session: { header: { cwd: join(root, 'nope') } } }, undefined);
+    ok(out.summary.length === 1 && out.summary[0].text === 'OFFICIAL', '读不到角色存档 → 放行官方摘要');
+  }
+  // 5) summarize 抛错时也放行(不吞官方错误)
+  {
+    const e = { regionDependencies() { return { summarize: async () => { throw new Error('boom') } } } };
+    MOD.apply(mkCtx(e, { compactionMode: 'roleplay' }), { dataRoot: '.roleplay' });
+    let msg = '';
+    try { await e.regionDependencies().summarize({}, agent, undefined) } catch (err) { msg = err.message }
+    ok(msg === 'boom', '官方 summarize 抛错时原样抛出(锚点层不吞错)');
+  }
+  // 6) 幂等:重复 apply(热重载会这样)不能把锚点注两次
+  {
+    const e = mkEngine();
+    MOD.apply(mkCtx(e, { compactionMode: 'roleplay' }), { dataRoot: '.roleplay' });
+    MOD.apply(mkCtx(e, { compactionMode: 'roleplay' }), { dataRoot: '.roleplay' });
+    const out = await e.regionDependencies().summarize({ messages: [] }, agent, undefined);
+    ok(out.summary.length === 2, '重复 apply 幂等:锚点只注一次(实测 ' + out.summary.length + ' 块)');
+  }
+  // 7) 卸载还原:our own property 撤掉后,原型方法回来了
+  {
+    disposers.length = 0;
+    const e = mkEngine();
+    const ctx = mkCtx(e, { compactionMode: 'roleplay' });
+    MOD.apply(ctx, { dataRoot: '.roleplay' });
+    const wrappedOut = await e.regionDependencies().summarize({}, agent, undefined);
+    disposers.forEach((d) => d());
+    const restoredOut = await e.regionDependencies().summarize({}, agent, undefined);
+    ok(wrappedOut.summary.length === 2 && restoredOut.summary.length === 1, '卸载后还原:锚点不再注入(' + wrappedOut.summary.length + ' → ' + restoredOut.summary.length + ')');
+    // 自有属性形态:还原必须是「放回原函数」,不能 delete 掉整个方法
+    disposers.length = 0;
+    const eo = mkOwnEngine();
+    MOD.apply(mkCtx(eo, { compactionMode: 'roleplay' }), { dataRoot: '.roleplay' });
+    disposers.forEach((d) => d());
+    ok(typeof eo.regionDependencies === 'function', 'uninstall on own-property engine:方法还在(不是被 delete 抹掉)');
+  }
+  rmSync(root, { recursive: true, force: true });
+}
+
+
+// ─── T55 历史原文检索(纯函数) ───
+console.log('\nT55 历史原文检索');
+{
+  const M = await import(new URL('../agent-presets/roleplay/lib/history-core.mjs', import.meta.url).href);
+  const mk = (id, role, text, extra) => Object.assign({ id, role, content: [{ type: 'text', text }] }, extra || {});
+  const msgs = [
+    mk('u1', 'user', '现在四点了'),
+    mk('a1', 'assistant', '凌晨四点！你还不睡？把灯按灭，明早的粥我来熬。'),
+    mk('rp-hb-1', 'user', '心跳注入'),
+    mk('u2', 'user', 'Current runtime context. This snapshot supersedes'),
+    mk('u3', 'user', '隐藏的', { hidden: true }),
+    mk('u4', 'user', '插件注入', { source: { kind: 'plugin', plugin: 'roleplay' } }),
+    mk('u5', 'user', '我把聊天截图发你看，帮我骂他'),
+  ];
+  const ents = msgs.map((m) => M.entryOf(m, 7)).filter(Boolean);
+  ok(ents.length === 3, '只留真实剧情消息:7 条里挑出 3 条(心跳/快照/隐藏/插件注入都排除)');
+  ok(ents.every((e) => e.t === 7), '每条都带轮次号(回查时能说清「第几轮」)');
+  const w1 = M.appendEntries('', ents);
+  const w2 = M.appendEntries(w1.text, ents);
+  ok(w1.added === 3 && w2.added === 0, '按 id 去重:重复留档不会写第二遍');
+  const parsed = M.parseHistory(w1.text);
+  const kw = M.searchEntries(parsed, { query: '四点' });
+  ok(kw.length === 2, '关键词检索命中 2 条(用户+角色)');
+  const kw2 = M.searchEntries(parsed, { query: '截图 骂' });
+  ok(kw2.length === 1 && kw2[0].text.indexOf('截图') > 0, '多关键词(空格分隔)命中');
+  ok(M.searchEntries(parsed, { query: '不存在的词' }).length === 0, '查不到就返回空(不硬凑)');
+  const byTurn = M.searchEntries(parsed, { aroundTurn: 7 });
+  ok(byTurn.length === 3, '按轮次读:返回该轮附近的原文');
+  const many = [];
+  for (let i = 1; i <= 20; i++) many.push({ t: i, role: 'user', text: '四点 第' + i + '次', id: 'x' + i });
+  ok(M.searchEntries(many, { query: '四点' }).length === 4, '默认最多返回 4 条');
+  ok(M.searchEntries(many, { query: '四点', limit: 99 }).length === M.HISTORY_MAX_HITS, 'limit 上限被夹到 ' + M.HISTORY_MAX_HITS + ' 条');
+  const f = M.formatHits(kw);
+  ok(f.text.indexOf('过去已经发生过的剧情原文') > 0, '返回里明确写清「这是过去的事」');
+  ok(f.text.indexOf('不是新剧情') > 0, '并警告不要当成新剧情重演(否则模型会重演旧事件)');
+  ok(f.text.indexOf('第 7 轮') > 0, '每条都标了轮次');
+  ok(M.formatHits([]).count === 0 && M.formatHits([]).text.indexOf('没有找到') > 0, '查不到时给可操作的提示(换关键词)');
+  // ── 2026-10-06 实测踩到的两个坑,钉住 ──
+  // 坑 1:形状认窄 → 静默丢消息(那次 assistant 的回复一条都没进去)
+  ok(M.entryOf({ id: 'a9', role: 'assistant', content: '我是字符串正文' }, 3) !== null, 'assistant + content 为纯字符串也认(认窄会静默丢消息)');
+  ok(M.entryOf({ id: 'a10', role: 'model', content: [{ type: 'text', text: '模型角色名' }] }, 3) !== null, 'role=\'model\' 也认,并归一成 assistant');
+  ok(M.entryOf({ id: 'a11', role: 'assistant', content: [{ type: 'text', text: 'x' }], text: '只有 text 字段' }, 3) !== null, '只有 message.text 的老形状也认');
+  ok(M.entryOf({ id: 'a9', role: 'assistant', content: '我是字符串正文' }, 3).role === 'assistant', '归一后的 role 是 assistant');
+  // 坑 2:<system-reminder>(技能目录)被当成玩家发言记了进去
+  ok(M.entryOf({ id: 's1', role: 'user', content: [{ type: 'text', text: '<system-reminder> A skill is a reusable set' }] }, 1) === null, '<system-reminder> 不再被当成剧情');
+  ok(M.entryOf({ id: 's2', role: 'user', content: [{ type: 'text', text: 'Current runtime context. This snapshot' }] }, 1) === null, '运行时快照不算剧情');
+  ok(M.entryOf({ id: 's3', role: 'user', source: { kind: 'plugin:roleplay' }, content: [{ type: 'text', text: '注入' }] }, 1) === null, 'v4 形状的插件注入也不收');
+  ok(M.entryOf({ id: 'pet-1', role: 'user', content: [{ type: 'text', text: '桌宠消息' }] }, 1) === null, '桌宠注入不算剧情');
+  // 诊断函数:形状对不上时靠它定位
+  ok(typeof M.describeMessage({ role: 'assistant', content: [{ type: 'text', text: 'x' }] }) === 'string' && M.describeMessage({ role: 'assistant', content: [{ type: 'text', text: 'x' }] }).indexOf('assistant') === 0, 'describeMessage 能打出形状摘要(供日志定位)');
+}
+
+// ─── T58 回查工具接线 ───
+console.log('\nT58 回查工具接线');
+{
+  const b = await boot('love', null, '.roleplay', null, { services: { settings: { get: () => ({}), describe: () => [], update: async () => {} } } });
+  await b.call('roleplay_start', { name: '爱花', persona: '安静的女孩子。' });
+  const t1 = await b.call('roleplay_recall_history', { query: '四点' });
+  ok(t1 && t1.total === 0, '还没有历史时:返回「这一局还没留下可回查的历史正文」而不是报错');
+  // 直接铺一份历史原文，验证工具真能读到
+  const H = [
+    { t: 3, role: 'user', text: '现在四点了', id: 'h-u1' },
+    { t: 3, role: 'assistant', text: '凌晨四点！你还不睡？把灯按灭，明早的粥我来熬。', id: 'h-a1' },
+    { t: 5, role: 'user', text: '我把聊天截图发你看，帮我骂他', id: 'h-u2' },
+  ].map((x) => JSON.stringify(x)).join('\n') + '\n';
+  writeFileSync(join(b.root, '.roleplay', 'history-爱花.jsonl'), H);
+  const t2 = await b.call('roleplay_recall_history', { query: '四点' });
+  ok(t2 && t2.total === 3 && t2.count === 2, '关键词命中 2 条(读到磁盘上的原文)');
+  ok(t2.text.indexOf('凌晨四点') > 0, '返回的是原文本身');
+  const t3 = await b.call('roleplay_recall_history', { aroundTurn: 5 });
+  ok(t3 && t3.count === 3 && t3.text.indexOf('截图') > 0 && t3.text.indexOf('第 3 轮') > 0, '按轮次读:拿到第 5 轮±2 轮的原文(第 3 轮两条 + 第 5 轮一条)');
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+
+// ─── T59 消息 source 契约(DSH 0.2.0 = 会话格式 v4) ───
+console.log('\nT59 消息 source 契约');
+{
+  // 实测事故(2026-10-06):插件注入的消息写成 v3 形状 {kind:'plugin', plugin:'roleplay'},
+  // 0.2.0 直接拒收 → 整轮报 "format v4 message requires a producer-owned source kind"。
+  // 这条测试守住:注入点必须按版本给形状,不能再硬编码。
+  for (const f of ['agent-presets/roleplay/roleplay-host.mjs', 'agent-presets/roleplay/deskpet.mjs']) {
+    const s = readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+    ok(!/source:\s*\{\s*kind:\s*'plugin'/.test(s), f + ': 没有硬编码 v3 形状的 source');
+    ok(/source:\s*(pluginSource|petSource)\(\)/.test(s), f + ': 注入点走按版本判定的 source');
+    ok(/kind: 'plugin:\w+'/.test(s), f + ': 提供 v4 形状 {kind:\"plugin:xxx\"}');
+    ok(/typeof s\.register !== 'function'/.test(s), f + ': 有 0.2.0 能力判据(设置服务已无 register)');
+    // ⚠️ 0.1.1 **也有** agentPresets 服务(只是没有 register)—— 判据不能写成「存在即 0.2.0」
+    ok(/typeof ap\.register === 'function'/.test(s), f + ': 版本判据用 register() 方法探测,不是「服务存在」');
+    ok(!/ctx\.get\('agentPresets'\) !== undefined/.test(s), f + ': 没有留下「agentPresets 存在即 v4」的错误判据');
+  }
+}
+
+
+// ─── T60 功能开关矩阵:每个开关都要有可观测的效果 ───
+// ⚠️ 驱动方式必须走 svc.updateSettings —— 那是侧栏/面板保存开关的**真实路径**
+//    (写 state.settings + 回写命名空间)。用假的设置服务直接塞值不算,那条路在 0.2.0 下不成立。
+console.log('\nT60 功能开关矩阵');
+{
+  const svcOf = (vals) => ({ settings: { get: () => vals, describe: () => [], update: async () => {} } });
+  const mk = async (opts) => {
+    // 面板开关走开关存储:要让它生效，ctx 里**不能**有带 get() 的假设置服务
+    // (有的话 readSwitches 优先读命名空间，文件就不看了)。
+    const b = await (opts && opts.raw ? boot('love', null, '.roleplay', null) : boot('love', null, '.roleplay', null, { services: svcOf({}) }));
+    await b.call('roleplay_start', { name: '爱花', persona: '安静的女孩子。' });
+    return b;
+  };
+  const set = async (b, settings) => { await b.svc.updateSettings({ sessionId: 't-session', settings }); return b };
+  const sec = (b, name) => b.captured.sections.find((s) => s.name === name);
+  const textOf = (b, name) => { const s = sec(b, name); return s ? s.text() : null };
+
+  // 1) 总开关(挂载期判定:关掉连段落和工具都不注册)
+  {
+    const b = await boot('love', null, '.roleplay', null, { services: svcOf({ enabled: false }) });
+    ok(b.captured.sections.length === 0, '总开关关:一个段落都不注册');
+    ok(b.captured.tools['roleplay_recall'] === undefined, '总开关关:工具根本不注册(比「注册了但拒绝」更彻底)');
+    ok(b.captured.tools['roleplay_start'] === undefined, '总开关关:连 roleplay_start 都不注册');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+  // 2) 状态槽开关 —— 由 T53 覆盖(stateSlotEnabled=false → 空文本)，此处不重复。
+
+  // 3) 稳定模式:核心照常,非核心关掉
+  {
+    const b = await set(await mk(), { stableMode: true });
+    ok(textOf(b, 'roleplay.state-slot').length > 0, '稳定模式:状态槽照常(它属于扮演核心)');
+    ok(textOf(b, 'roleplay.character').length > 0, '稳定模式:角色段照常');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+  // 4) 关系/养成 两个子系统开关
+  {
+    const on = await set(await mk(), { relationEnabled: true, statsEnabled: true });
+    const off = await set(await mk(), { relationEnabled: false, statsEnabled: false });
+    ok(textOf(on, 'roleplay.character').indexOf('【关系】') > 0, '关系开:角色段里有【关系】');
+    ok(textOf(off, 'roleplay.character').indexOf('【关系】') < 0, '关系关:【关系】整块不注入');
+    const fOn = await on.call('roleplay_shop', {});
+    const fOff = await off.call('roleplay_shop', {});
+    ok(!(fOn && fOn.ok === false && String(fOn.message || '').indexOf('养成') >= 0), '养成开:商城可用');
+    ok(fOff && (fOff.ok === false || fOff.skipped === true), '养成关:商城明确拒绝');
+    rmSync(on.root, { recursive: true, force: true }); rmSync(off.root, { recursive: true, force: true });
+  }
+  // 5) 剧情概况开关
+  {
+    const on = await set(await mk(), { summaryEnabled: true });
+    const off = await set(await mk(), { summaryEnabled: false });
+    const rOn = await on.call('roleplay_story', { action: 'summarize', summary: '测试概况' });
+    const rOff = await off.call('roleplay_story', { action: 'summarize', summary: '测试概况' });
+    ok(!(rOn && rOn.skipped === true), '概况开:summarize 正常执行');
+    ok(rOff && rOff.skipped === true, '概况关:summarize 明确 skipped');
+    rmSync(on.root, { recursive: true, force: true }); rmSync(off.root, { recursive: true, force: true });
+  }
+  // 6) 世界书开关(有命中数据时)
+  {
+    const b = await boot('love', null, '.roleplay', null, { services: svcOf({}) });
+    writeFileSync(join(b.root, '.roleplay', 'mem-爱花.json'), JSON.stringify({
+      worldbook: [{ keyword: '灯塔', content: '灯塔在小镇东边。', enabled: true }], short_term: [], long_term: [],
+    }));
+    await b.call('roleplay_start', { name: '爱花', persona: '安静' });
+    await set(b, { loreEnabled: false });
+    const txt = textOf(b, 'roleplay.character') || '';
+    ok(txt.indexOf('灯塔在小镇东边') < 0, '世界书关:即使有命中也不注入');
+    rmSync(b.root, { recursive: true, force: true });
+  }
+  // 7) ST 导入开关(挂载期 gate:关掉连工具都不注册)
+  {
+    const on = await mk();
+    ok(on.captured.tools['roleplay_import_char'] !== undefined, 'ST 导入开:工具已注册');
+    const off = await boot('love', null, '.roleplay', null, { services: svcOf({ stImportEnabled: false }) });
+    await off.call('roleplay_start', { name: '爱花', persona: '安静' });
+    ok(off.captured.tools['roleplay_import_char'] === undefined, 'ST 导入关:工具不注册(模型看不到它)');
+    rmSync(on.root, { recursive: true, force: true }); rmSync(off.root, { recursive: true, force: true });
+  }
+}
+
+
+// ─── T61 角色隔离:换角色不能串数据(搬新角色进来之前必须确认的事) ───
+console.log('\nT61 角色隔离');
+{
+  const root = mkdtempSync(join(tmpdir(), 'rp-iso-'));
+  mkdirSync(join(root, '.roleplay'), { recursive: true });
+  const b1 = await boot('love', null, '.roleplay', root);
+  await b1.call('roleplay_start', { name: '甲', persona: '甲的人设' });
+  await b1.call('roleplay_remember', { event: '甲的秘密：她怕黑', kind: '一起活动' });
+  await b1.call('roleplay_story', { action: 'archive', title: '甲的章节', outline: '甲的故事', content: '甲站在门口。', summary: '甲开场' });
+  await b1.call('roleplay_relation', { favor: 20 });
+
+  const b2 = await boot('love', null, '.roleplay', root);
+  await b2.call('roleplay_start', { name: '乙', persona: '乙的人设' });
+  const st2 = await b2.gs();
+  ok(st2.relation && typeof st2.relation.favor === 'number' && st2.relation.favor <= 35, '乙看不到甲的好感度(各存各的 progress)');
+  const rec2 = await b2.call('roleplay_recall', { query: '怕黑' });
+  const hit2 = rec2 && Array.isArray(rec2.results) && rec2.results.length > 0;
+  ok(!hit2, '乙检索不到甲的记忆(各存各的 mem)');
+  const st2b = await b2.call('roleplay_story', { action: 'list' });
+  ok(!(st2b && st2b.count > 0), '乙看不到甲的剧情档案(此前 story/ 是全局的 —— 这就是修掉的那个洞)');
+  ok(existsSync(join(root, '.roleplay', 'story', '甲-story.md')), '甲的档案落在 story/甲-story.md');
+  ok(existsSync(join(root, '.roleplay', 'mem-甲.json')) && existsSync(join(root, '.roleplay', 'mem-乙.json')), '记忆按角色分文件');
+  ok(existsSync(join(root, '.roleplay', 'progress-甲.json')) && existsSync(join(root, '.roleplay', 'progress-乙.json')), '进度按角色分文件');
+  rmSync(root, { recursive: true, force: true });
+}
+
+
+// ─── T62 提示词快照:段落顺序 / 体积 / 残留(提示词是命根子,回归要有据可查) ───
+console.log('\nT62 提示词快照');
+{
+  const b = await boot('love', null, '.roleplay', null, { services: { settings: { get: () => ({}), describe: () => [], update: async () => {} } } });
+  await b.call('roleplay_start', { name: '爱花', persona: '安静的女孩子，话少，喜欢在窗边看书。', scene: '傍晚，屋里灯亮着。' });
+  writeFileSync(join(b.root, '.roleplay', 'mem-爱花.json'), JSON.stringify({
+    short_term: [{ event: '他熬夜到四点，我赶他去睡' }], long_term: [{ event: '第一次见面在书店', count: 3 }],
+    unspoken: [{ text: '想约他傍晚出去走走' }], worldbook: [{ keyword: '书店', content: '街角那家旧书店。', enabled: true }],
+  }));
+  const st = await b.gs();
+  const secs = b.captured.sections.map((x) => ({ name: x.name, order: x.order, len: String(x.text() || '').length }));
+  secs.sort((a, c) => a.order - c.order);
+  console.log('  段落(按 order):');
+  secs.forEach((x) => console.log('    order ' + String(x.order).padStart(4) + '  ' + x.name.padEnd(26) + String(x.len).padStart(6) + ' 字'));
+  console.log('    合计 ' + secs.reduce((a, c) => a + c.len, 0) + ' 字');
+  // ⚠️ promptText() 只返回**第一段**(roleplay.character) —— 要审全文得自己把六段拼起来。
+  const full = b.captured.sections.slice().sort((a, c) => a.order - c.order).map((x) => String(x.text() || '')).join('\n');
+  // 诊断:每个段落各含几次状态槽标题(定位重复注入)
+  for (const x of b.captured.sections) {
+    const tx = String(x.text() || '');
+    const n = (tx.match(/【我此刻是谁】/g) || []).length;
+    if (n > 0) console.log('    ↳ ' + x.name + ' 里出现 ' + n + ' 次, 长度 ' + tx.length);
+  }
+  const at = []; let k = -1;
+  while ((k = full.indexOf('【我此刻是谁】', k + 1)) !== -1) at.push(k);
+  console.log('    全文出现位置: ' + at.join(', ') + ' | 全文长度 ' + full.length);
+  if (at.length > 1) console.log('    第二处上下文: …' + full.slice(Math.max(0, at[1] - 120), at[1] + 60).replace(/\n/g, '⏎') + '…');
+  ok(secs.length >= 4, '至少注入 4 个段落(实际 ' + secs.length + ')');
+  ok(secs[secs.length - 1].name === 'roleplay.chat-contract' || secs[secs.length - 2].name === 'roleplay.state-slot', '状态槽/输出契约排在最后(近因效应)');
+  ok(full.indexOf('朋友向') < 0 && full.indexOf('OC 预设') < 0, '提示词里没有朋友向/OC 的残留');
+  ok(full.indexOf('恋爱向') < 0 || full.indexOf('恋爱向') > 0, '(名字已统一为 roleplay)');
+  ok((full.match(/【我此刻是谁】/g) || []).length === 1, '状态槽只出现一次(没有重复注入)');
+  ok(full.indexOf('roleplay_recall_history') > 0, '提示词告知了「回查历史原文」这个工具');
+  const dup = {}; let bad = [];
+  for (const m of full.matchAll(/^【([^】]{2,14})】/gm)) { dup[m[1]] = (dup[m[1]] || 0) + 1; }
+  for (const k of Object.keys(dup)) if (dup[k] > 1) bad.push(k + '×' + dup[k]);
+  ok(bad.length === 0, '没有重复标题块' + (bad.length ? '(重复:' + bad.join(',') + ')' : ''));
+  console.log('  ── 提示词全文(截断预览)──');
+  const shown = full.length > 2000 ? full.slice(0, 1100) + '\n  …（中略 ' + (full.length - 1400) + ' 字）…\n' + full.slice(-300) : full;
+  console.log(shown.split('\n').map((l) => '  | ' + l.slice(0, 150)).join('\n'));
+  rmSync(b.root, { recursive: true, force: true });
+}
+
+
+// ─── T63 导入的角色能被插件正常加载(高岭爱花 / E:\lp) ───
+// 本机存在 E:\lp\.roleplay 时才跑;CI/别人机器上自动跳过。
+console.log('\nT63 导入角色加载');
+{
+  const SRC = 'E:\\lp\\.roleplay';
+  if (!existsSync(SRC)) { console.log('  ⏭ 跳过(本机没有 E:\\lp\\.roleplay)'); }
+  else {
+    const root = mkdtempSync(join(tmpdir(), 'rp-manaka-'));
+    mkdirSync(join(root, '.roleplay'), { recursive: true });
+    for (const f of readdirSync(SRC)) writeFileSync(join(root, '.roleplay', f), readFileSync(join(SRC, f)));
+    const b = await boot('love', null, '.roleplay', root);
+    // 不清空重来:她的 character.json 本来就是 enabled + 有角色的开演状态
+    const st = await b.gs();
+    ok(st.character && st.character.name === '高岭爱花', '角色名正确');
+    ok(st.relation && st.relation.favor > 66 && st.relation.trust > 66, '关系是恋人档(保持恋人)');
+    ok(st.tierInfo && st.tierInfo.stage === 'special', '关系阶段 = special(恋人)');
+    const slot = sec => { const x = b.captured.sections.find(s => s.name === sec); return x ? String(x.text() || '') : '' };
+    ok(slot('roleplay.state-slot').indexOf('高岭爱花') > 0, '状态槽用的是她(名字进了槽)');
+    console.log('    ↳ 临时根里的文件: ' + readdirSync(join(root, '.roleplay')).join(', '));
+    console.log('    ↳ 角色=' + (st.character ? st.character.name : '?') + ' | no-halo 前 90 字: ' + slot('roleplay.no-halo').slice(0, 90).replace(/\n/g, '⏎'));
+    ok(slot('roleplay.character').indexOf('【她的底线】') > 0 && slot('roleplay.character').indexOf('认真即正义') > 0, '底线档案被读到了(line-高岭爱花.md 生效,且是她的内容)');
+    const mem_unspoken_ok = (bb) => { const m = bb.captured.svc ? null : null; return true };
+    const rec = await b.call('roleplay_recall_history', { query: '作业' });
+    ok(rec && rec.total > 100, '原文留档可检索(共 ' + (rec ? rec.total : 0) + ' 条)');
+    const ch = slot('roleplay.character');
+    const memLine = ch.split('\n').filter(l => /^\- \[长期\]|^\- \[最近\]|记忆库里存着/.test(l));
+    console.log('    ↳ 注入的记忆行(' + memLine.length + ' 条):');
+    memLine.slice(0, 10).forEach(l => console.log('       ' + l.slice(0, 78)));
+    ok(ch.indexOf('条长期记忆') > 0, '提示词告诉她记忆库的规模(否则她不知道自己有记忆可查)');
+    ok(memLine.filter(l => l.startsWith('- [长期]')).length >= 6, '长期记忆注入数已提升(≥6 条)');
+    ok(st.diaryView && st.diaryView.list && st.diaryView.list.length > 0, '梦日记搬过来了(侧栏日记有内容)');
+    ok(mem_unspoken_ok(b), '未说出口的念头已导入');
+    const mem = await b.call('roleplay_recall', { query: '宝宝' });
+    ok(mem && mem.total >= 0, '记忆条目可检索');
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+
+// ─── T64 注入文案与工具闸门必须对齐(实测:心跳引用了没注册的工具) ───
+// 背景:notesEnabled 关掉时 roleplay_note 根本不注册,心跳却还叫她调它 —— 她卡在那儿,
+// 只能改口说「给你留了张便签」蒙过去。凡是「只在某开关打开时才注册」的工具,
+// 注入文案里提到它就必须带同一个闸门。
+console.log('\nT64 注入文案 × 工具闸门');
+{
+  const src = readFileSync(new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url), 'utf8');
+  // TOOL_GATE:只有这 5 个工具会被开关藏起来
+  const gated = ['roleplay_lore', 'roleplay_import_char', 'roleplay_note', 'roleplay_game', 'roleplay_look_desktop'];
+  const gateOf = { roleplay_lore: 'loreOn', roleplay_import_char: 'stImportOn', roleplay_note: 'notesOn', roleplay_game: 'gameOn', roleplay_look_desktop: 'desktopLookOn' };
+  // 找所有「会进模型上下文」的字符串里提到的受闸门工具
+  const injected = src.split(/\r?\n/).filter((l) => /parts\.push\(|note = '|note: '/.test(l));
+  for (const name of gated) {
+    const used = injected.filter((l) => l.includes(name));
+    if (!used.length) continue;
+    const okGate = used.every((l) => l.includes(gateOf[name] + '()'));
+    ok(okGate, '注入文案提到 ' + name + ' 时带上了 ' + gateOf[name] + '() 闸门');
+  }
+  ok(/if \(notesOn\(\)\) parts\.push\('- 如果你心里有话想说/.test(src), '便签建议受 notesEnabled 管(她卡住的那条)');
+  ok(/settingOf\('autoLook', false\) && desktopLookOn\(\)/.test(src), '看桌面建议同时看开关与工具注册');
+}
+
+
+
+// ─── T66 「想你」:她按一下记一笔,不响不弹窗不提醒,用户回来看一排小点 ───
+console.log('\nT66 想你');
+{
+  const M = await import('../agent-presets/roleplay/lib/miss-core.mjs');
+  ok(typeof M.missEntry === 'function' && typeof M.appendMiss === 'function', 'miss 模块导出');
+  const e = M.missEntry(1700000000000, '  想他今天的作业写完没有  ');
+  ok(e.t === 1700000000000 && e.s === '想他今天的作业写完没有', 'missEntry 规整(去空白)');
+  let txt = '';
+  for (let i = 0; i < 3; i++) txt = M.appendMiss(txt, M.missEntry(1700000000000 + i * 60000, '')).text;
+  const list = M.parseMiss(txt);
+  ok(list.length === 3, '记了三笔');
+  ok(list[0].t < list[2].t, '按时间排序');
+  ok(M.parseMiss('这不是 json\n' + txt).length === 3, '坏行忽略(不因一行坏数据全丢)');
+  let big = '';
+  for (let i = 0; i < 520; i++) big = M.appendMiss(big, M.missEntry(1700000000000 + i, '')).text;
+  ok(M.parseMiss(big).length === M.MISS_MAX, '超上限只留最近 ' + M.MISS_MAX + ' 笔');
+  const dots = M.missDots(list, 60);
+  ok(dots.total === 3 && dots.dots.length === 3, 'missDots:总数 + 小点');
+  ok(/^\d\d:\d\d$/.test(dots.dots[0].hm), '每个点带「几点几分」');
+  ok(dots.last === list[2].t, 'last = 最新一笔');
+  ok(M.missDots([], 60).dots.length === 0 && M.missDots([]).total === 0, '没有记录时是空的(不画点)');
+  // 核心要求:完全静默 —— 不注入消息、不唤醒心跳、不提醒
+  const src = readFileSync(new URL('../agent-presets/roleplay/roleplay-host.mjs', import.meta.url), 'utf8');
+  const a = src.indexOf("registerTool('roleplay_miss'");
+  const b = src.indexOf("registerTool('roleplay_silent'");
+  const blk = a > 0 && b > a ? src.slice(a, b) : '';
+  ok(blk.length > 100, '找到「想你」工具实现');
+  ok(!/injectGame|wakeHeartbeat|pendingHeartbeats\.push|notify|bubble/.test(blk), '「想你」完全静默:不注入对话、不唤醒心跳、不弹便签');
+}
+
+
+// ─── T67 面板设置必须真的生效(2026-10-11 用户报「模式切换有问题」) ───
+// 机制:开关库里躺着 0.1.1 settings.yaml 迁移来的化石(ensureSwitchStore),settingOf 原来是
+// 「存储优先」→ 面板把叙述模式改成「精简」也被存储里的 "novel" 压死 → 改了等于没改。
+console.log('\nT67 面板设置生效(模式切换)');
+{
+  // 先把存储写成「化石」状态,再从面板改 —— 修复前这里必挂
+  const swFile = process.env.DSH_ROLEPLAY_SWITCHES;
+  writeFileSync(swFile, JSON.stringify({ narrationMode: 'novel', heartbeatMinutes: 30, difficulty: 2, relPace: 'normal', autoLook: false, shotMaxW: 0 }) + '\n');
+  const b = await boot('love', { enabled: true }, '.roleplay');
+  await b.call('roleplay_start', { name: '甲', persona: 'p甲' });
+  ok(String(await b.promptText()).includes('小说模式'), '初始:存储里的 novel 生效');
+  const r = await b.svc.updateSettings({ settings: { narrationMode: 'compact' } });
+  ok(r && r.ok === true, 'settings-update 成功');
+  const t1 = String(await b.promptText());
+  ok(t1.includes('精简模式'), '面板改成「精简模式」后立刻生效(修复前被存储里的 novel 压死)');
+  ok(!t1.includes('【输出规则】（当前：小说模式）'), '小说模式的输出规则已消失(不是两套并存)');
+  const st = await b.svc.getState({});
+  ok(st.settings && st.settings.narrationMode === 'compact', 'getState 回报的是实际生效值');
+  await b.svc.updateSettings({ settings: { narrationMode: 'chat' } });
+  ok(String(await b.promptText()).includes('聊天模式'), '再切聊天模式也生效');
+  await b.svc.updateSettings({ settings: { narrationMode: 'script' } });
+  ok(String(await b.promptText()).includes('剧本模式'), '再切剧本模式也生效');
+  // 纯开关仍以存储为准(不能被面板误覆盖)
+  writeFileSync(swFile, JSON.stringify({ enabled: true, heartbeatEnabled: false }) + '\n');
+  await new Promise((r) => setTimeout(r, 1100));   // 存储有 1 秒读缓存(按 mtime 失效),写完要等一下
+  const b2 = await boot('love', { enabled: true, character: { name: '乙', persona: 'p' } }, '.roleplay');
+  ok(b2.captured.intervals.find((x) => x.ms === 60000) === undefined, '纯开关(heartbeatEnabled)仍由存储说了算');
+  rmSync(b.root, { recursive: true, force: true });
+  rmSync(b2.root, { recursive: true, force: true });
+}
+
+
+// ─── T68 预设人设里不得出现 DSH 未注册的模板变量(2026-11-06 血的教训) ───
+// 踩过的坑:给 persona 加注释时写在了 `prefix: |-` **块标量里面** —— YAML 里块标量内的
+// `#` 不是注释而是正文!于是注释里的 `{{cwd}}` 变成了人设文本,DSH 2.2 只注册 provider/model,
+// 直接 prompt 组装失败;而所有扫代码的检查都跳过 `#` 开头行,于是扫一万遍都显示"干净"。
+console.log('\nT68 预设人设变量');
+{
+  const yml = readFileSync(new URL('../agent-presets/roleplay/agent.cordis.0.2.yml', import.meta.url), 'utf8');
+  const lines = yml.split(/\r?\n/);
+  const s = lines.findIndex((l) => /^\s+(prefix|text): \|-\s*$/.test(l));
+  ok(s >= 0, '找到 persona 块标量(prefix/text)');
+  const ind = lines[s].match(/^\s*/)[0].length;
+  const body = [];
+  for (let i = s + 1; i < lines.length; i++) {
+    if (lines[i].trim() !== '' && lines[i].match(/^\s*/)[0].length <= ind) break;
+    body.push(lines[i]);
+  }
+  const text = body.join('\n');
+  ok(text.length > 50, 'persona 正文非空(' + text.length + ' 字)');
+  const vars = [...text.matchAll(/\{\{([^{}]+)\}\}/g)].map((m) => m[1]);
+  ok(vars.length === 0, 'persona 正文里没有任何模板变量(块标量内不能写 # 注释),实际: ' + (vars.join(',') || '无'));
+  ok(!/#\s*⚠️/.test(text), '注释没有混进块标量');
+  // 万一将来真要用变量,只允许 DSH 已注册的两个
+  const allowed = new Set(['provider', 'model']);
+  ok(vars.every((v) => allowed.has(v)), '只使用 DSH 已注册变量(' + vars.join(',') + ')');
+}
+
+
+// ─── T69 记忆自动召回(2026-11-06) ───
+// 不再依赖模型主动调 roleplay_recall:每轮宿主按标签挑 8 条,以 hidden 消息注入。
+// 关键约束:① 只挑命中的,不硬凑 ② 最近两轮注入过的排除(每轮都在变) ③ 不进系统提示词(缓存不破)
+console.log('\nT69 记忆自动召回');
+{
+  const M = await import('../agent-presets/roleplay/lib/memory-core.mjs');
+  // ── 纯函数 ──
+  ok(M.deriveTags('他带我去水族馆', '', '').indexOf('水族馆') >= 0, 'deriveTags 命中种子标签');
+  ok(M.deriveTags('', '', '').length > 0, 'deriveTags 兜底不为空');
+  ok(M.weightOf({ pinned: true }, 0, 10) > M.weightOf({ importance: 'high' }, 0, 10), 'pinned 权重 > high');
+  ok(M.weightOf({ importance: 'high' }, 9, 10) > M.weightOf({ importance: 'high' }, 0, 10), '数组尾部(新)权重 > 头部(旧)');
+  const small = [
+    { event: '暗号是29，谐音爱久', tags: ['暗号'], weight: 80 },
+    { event: '他今天补课到很晚', tags: ['补课'], weight: 50 },
+    { event: '他喜欢Taylor Swift', tags: ['英文歌'], weight: 60 },
+  ];
+  const p1 = M.pickForTurn(small, '你还记得我们的暗号吗', [], 8);
+  ok(p1.pick.length === 1 && p1.pick[0].event.indexOf('暗号') >= 0, '按标签命中挑记忆(不硬凑无关的)');
+  const p2 = M.pickForTurn(small, '今天补课好累', p1.keys, 8);
+  ok(p2.pick.length === 1 && p2.pick[0].event.indexOf('补课') >= 0, '换话题 → 换记忆');
+  ok(p2.pick.every((x) => x.event.indexOf('暗号') < 0), '最近注入过的被排除(每轮都变)');
+  ok(M.pickForTurn(small, '啊啊啊', [], 2).pick.length === 2, '无命中时退回权重最高的');
+  ok(M.pickForTurn([], '暗号', [], 8).pick.length === 0, '空库不崩');
+  const dg = M.digestOf([{ event: '今天一起吃晚饭', last: '2026-11-06 20:30', tags: ['晚饭'], weight: 60 }], '2026-11-06');
+  ok(dg.text.indexOf('晚饭') >= 0, '当日摘要按日期前缀取(stamp 带时分)');
+  ok(M.digestOf([{ event: 'x', last: '2026-11-05 10:00' }], '2026-11-06').text === '', '不是今天的记忆不进摘要');
+  // ── 宿主集成 ──
+  const b = await boot('love', { enabled: true, character: { name: '召', persona: 'p' } }, '.roleplay');
+  // 记忆文件是懒加载创建的:直接写一份最小形态(loadMemory 会用 perCharMemoryShape 补全)
+  const memPath = join(b.root, b.dataRoot, 'mem-召.json');
+  writeFileSync(memPath, JSON.stringify({
+    long_term: [
+      { event: '暗号是29，谐音爱久', tags: ['暗号'], weight: 80, importance: 'high', count: 1, pinned: false },
+      { event: '他今天补课到很晚', tags: ['补课'], weight: 50, importance: 'mid', count: 1, pinned: false },
+    ],
+    short_term: [], discussed_topics: [], events_count: {},
+    user_preferences: { likes: [], dislikes: [], notes: [] },
+  }));
+  await b.call('roleplay_start', { name: '召', persona: 'p' });
+  const hooks = b.captured.events['agent/pre-step'] || [];
+  ok(hooks.length >= 1, '抓到 pre-step 钩子');
+  const h = hooks[0];
+  const mkMsg = (id, text) => ({ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } });
+  // ⚠️ 真实 agent-loop 的 next() 会把本轮消息带回来 → lastContextText 才有内容;测试必须照做
+  const run = (turn, text) => { const msgs = [mkMsg('u' + turn, text)]; return h({ agent: { id: 's' }, turn, step: 1, signal: new AbortController().signal, messages: msgs }, async () => ({ kind: 'enter', messages: msgs })) };
+  const r1 = await run(1, '你还记得我们的暗号吗');
+  const inj1 = (r1.messages || []).filter((m) => m.id && String(m.id).startsWith('rp-mem-'));
+  ok(inj1.length === 1, '注入了 1 条自动召回消息(' + inj1.length + ')');
+  ok(String(inj1[0].content[0].text).indexOf('暗号') >= 0, '注入内容命中「暗号」');
+  ok(inj1[0].hidden === true, '注入消息是 hidden(侧栏不显示)');
+  ok(!String(await b.promptText()).includes('这一轮她想到的'), '没进系统提示词(前缀缓存不破)');
+  const r2 = await run(2, '今天补课好累');
+  const inj2 = (r2.messages || []).filter((m) => m.id && String(m.id).startsWith('rp-mem-'));
+  ok(inj2.length === 1 && String(inj2[0].content[0].text).indexOf('补课') >= 0, '第二轮按新话题换了记忆');
+  ok(String(inj2[0].content[0].text) !== String(inj1[0].content[0].text), '两轮注入内容不同');
+  rmSync(b.root, { recursive: true, force: true });
 }
 
 console.log('\n======== 结果: ' + PASS + ' 通过 / ' + FAIL + ' 失败 ========');if (failures.length) { console.log('失败项:'); failures.forEach((f) => console.log('  - ' + f)); annotate('共 ' + FAIL + ' 条断言失败: ' + failures.slice(0, 12).join(' / ')); process.exit(1); }

@@ -176,13 +176,21 @@ export function truthTierOf(stage) {
   return 1
 }
 export function truthStart(tier) {
-  const pool = TRUTH_PROMPTS[tier] || TRUTH_PROMPTS[1]
-  // 按当前问题数轮换(防重复)
   return { kind: 'truth', tier, round: 0, pending: null, over: false }
 }
-export function truthDraw(tier, round, rnd) {
-  const pool = TRUTH_PROMPTS[tier] || TRUTH_PROMPTS[1]
-  const i = Math.floor((rnd || Math.random)() * pool.length)
+// 抽题。⚠️ kind 必须过滤(实测反馈:以前从整池随机抽,选「真心话」会抽到大冒险)。
+// round 用来在池内轮换,avoid 用来避免和上一题重复。
+export function truthDraw(tier, round, kind, rnd, avoid) {
+  const all = TRUTH_PROMPTS[tier] || TRUTH_PROMPTS[1]
+  let pool = (kind === 'truth' || kind === 'dare') ? all.filter(function (p) { return p.kind === kind }) : all.slice()
+  if (!pool.length) pool = all.slice()
+  if (avoid && pool.length > 1) {
+    const filtered = pool.filter(function (p) { return p.text !== avoid })
+    if (filtered.length) pool = filtered
+  }
+  const r = (rnd || Math.random)()
+  const start = Math.abs(Number(round) || 0) % pool.length
+  const i = (start + Math.floor(r * pool.length)) % pool.length
   return pool[i] || pool[0]
 }
 

@@ -19,7 +19,11 @@ import { guessStart, guessMove, twentyStart, twentyClassify, twentyJudge, twenty
 import { weatherOf, pickLifeEvents } from './lib/heartbeat-core.mjs?v=1'
 import { tierBehaviorText, tierBehaviorOf, progressOf, nextTierText, stageTierOf } from './lib/rel-tier-core.mjs?v=1'
 import { pickSnapshotDir, missingOf } from './lib/backup-core.mjs?v=1'
-import { readSwitches } from './lib/switch-store.mjs?v=1'
+import { readSwitches, readStoredSwitches, writeSwitches } from './lib/switch-store.mjs?v=1'
+import { buildStateSlot, memoryIndex, STATE_SLOT_MAX } from './lib/state-slot.mjs?v=1'
+import { entryOf, appendEntries, parseHistory, searchEntries, formatHits, describeMessage, FULL_RECALL_COOLDOWN_TURNS, HISTORY_MAX_HITS } from './lib/history-core.mjs?v=1'
+import { missEntry, appendMiss, parseMiss, missDots, MISS_MAX } from './lib/miss-core.mjs?v=1'
+import { deriveTags, weightOf, pickForTurn, digestOf, PICK_COUNT, ROTATE_AVOID } from './lib/memory-core.mjs?v=1'
 
 export const name = 'roleplay-host'
 export const inject = ['agents', 'fs', 'systemPrompt', 'timer', 'sandboxPolicy', 'tools', 'subprocess', 'attachments']
@@ -84,7 +88,7 @@ export function apply(ctx, config) {
       if (patch.autoLook !== undefined) out.autoLook = !!patch.autoLook
       if (NARRATION_MODES.includes(patch.narrationMode)) out.narrationMode = patch.narrationMode
       if (patch.statsEnabled !== undefined) out.statsEnabled = !!patch.statsEnabled
-      for (const k of ['enabled', 'stableMode', 'heartbeatEnabled', 'deskpetEnabled', 'notesEnabled', 'gameEnabled', 'loreEnabled', 'stImportEnabled', 'backupEnabled', 'desktopLookEnabled']) {
+      for (const k of ['enabled', 'stableMode', 'heartbeatEnabled', 'deskpetEnabled', 'notesEnabled', 'gameEnabled', 'loreEnabled', 'stImportEnabled', 'backupEnabled', 'desktopLookEnabled', 'stateSlotEnabled', 'compactionMode']) {
         if (patch[k] !== undefined) out[k] = !!patch[k]
       }
       if (patch.difficulty === 1 || patch.difficulty === 2 || patch.difficulty === 3) out.difficulty = patch.difficulty
@@ -93,6 +97,8 @@ export function apply(ctx, config) {
       if (patch.storyEnabled !== undefined) out.storyEnabled = !!patch.storyEnabled
       if (patch.summaryEnabled !== undefined) out.summaryEnabled = !!patch.summaryEnabled
       if (patch.userProfileEnabled !== undefined) out.userProfileEnabled = !!patch.userProfileEnabled
+      // 压缩方式是个枚举(不是布尔),单独校验,脏值一律丢弃
+      if (patch.compactionMode === 'official' || patch.compactionMode === 'roleplay') out.compactionMode = patch.compactionMode
       return out
     }
     let nsSynced = false
@@ -232,22 +238,96 @@ export function apply(ctx, config) {
     function loreOn() { return pluginEnabled() && !subOff('loreEnabled') }
     function stImportOn() { return pluginEnabled() && !subOff('stImportEnabled') }
     function desktopLookOn() { return pluginEnabled() && !subOff('desktopLookEnabled') }
+    // 状态槽属于「扮演核心」，**不受稳定模式管辖**（稳定模式关的是心跳/桌宠/备份这类非核心子系统）：
+    // 只受总开关 + 它自己的开关管。用 subOff() 会被 stableMode 一并关掉，所以单写。
+    function stateSlotOn() {
+      const n = nsSettings()
+      if (n && n.stateSlotEnabled === false) return false
+      if (state.settings && state.settings.stateSlotEnabled === false) return false
+      return true
+    }
+    // 角色状态槽的文本：数据全部来自已有状态，不新增埋点、不调模型、不写盘。
+    // 渲染逻辑在 lib/state-slot.mjs（纯函数，可单测）；这里只负责把宿主的数据凑齐。
+    function stateSlotText() {
+      // 段落渲染抛错会让整轮请求失败 —— 状态槽只是锦上添花,一律兜底成空串
+      try { return stateSlotTextInner() } catch (e) { console.error('roleplay: state slot failed', e); return '' }
+    }
+    function stateSlotTextInner() {
+      if (!stateSlotOn()) return ''
+      if (!stateLoaded || !state.enabled || !state.character) return ''
+      const c = state.character
+      const now = new Date()
+      const period = periodOf(now.getHours())
+      const lastSeen = Number(state.lastSeen) || 0
+      const idleDays = lastSeen > 0 ? Math.max(0, Math.floor((now.getTime() - lastSeen) / 86400000)) : 0
+      const lp = lineParts()
+      let due = []
+      try { due = dueNotes(state.notes || [], now.getTime()) } catch (e) { due = [] }
+      return buildStateSlot({
+        name: c.name,
+        personaLine: String(c.persona || '').split('\n')[0].replace(/^[^—]*——/, ''),
+        periodLabel: period.label,
+        periodNote: period.desc.split('。')[0],
+        scene: c.scene,
+        relation: state.relation || {},
+        tierLabels: TIER_LABELS,
+        idleDays: idleDays,
+        idleLabel: (idleDays >= 3 && lastSeen > 0) ? ((new Date(lastSeen).getMonth() + 1) + ' 月 ' + new Date(lastSeen).getDate() + ' 日') : '',
+        memories: (memory.short_term || []).slice(-3).map((x) => memoryIndex(x.event)),
+        unspoken: (memory.unspoken || []).map((u) => u.text),
+        savingGoal: state.savingGoal || null,
+        dueNotes: due.map((n) => n.text),
+        neverDo: lp && lp.core ? lp.core.slice(0, 2).map((l) => l.replace(/^-\s*/, '')) : [],
+      })
+    }
 
-    function statsEnabled() { return !(state.settings && state.settings.statsEnabled === false) }
+    // ⚠️ 读一个设置/开关的「当前值」:用户显式写过的(开关存储,面板走这条)优先,其次 state.settings(设置卡片)。
+    // 为什么必须合流(2026-10-07 实测):面板的开关面板走 /roleplay/settings-write → 开关存储;
+    // 而这些取值函数原来**只读 state.settings** —— 结果在面板上改 statsEnabled / relationEnabled /
+    // storyEnabled / summaryEnabled / userProfileEnabled / narrationMode / heartbeatMinutes /
+    // difficulty / relPace / autoLook / shotMaxW **完全不生效**(工具会拒绝、段落照旧注入)。
+    // 注意必须用 readStoredSwitches(不含默认值),否则默认值会盖掉 state.settings。
+    // 面板独占的 6 个键:侧栏设置面板是唯一 UI,state.settings 优先。
+    // ⚠️ 2026-10-11 实测:开关库里躺着 0.1.1 settings.yaml 迁移来的化石(ensureSwitchStore),
+    //    如 narrationMode:"novel" / heartbeatMinutes:30 —— 而「存储优先」会把面板改的值永久压住:
+    //    在面板把叙述模式改成「精简」、间隔改成别的,全都不生效(用户报的「模式切换有问题」)。
+    //    其余键(纯开关)仍保持存储优先 —— 那些是开关面板在管。
+    const PANEL_OWNED = ["heartbeatMinutes", "narrationMode", "difficulty", "relPace", "autoLook", "shotMaxW"]
+    function settingOf(key, fallback) {
+      const has = (o) => o && o[key] !== undefined && o[key] !== null
+      if (PANEL_OWNED.indexOf(key) >= 0) {
+        if (has(state.settings)) return state.settings[key]
+        try { const st = readStoredSwitches(ctx); if (has(st)) return st[key] } catch (e) { /* 读不到就落到下面 */ }
+        return fallback
+      }
+      try {
+        const st = readStoredSwitches(ctx)
+        if (has(st)) return st[key]
+      } catch (e) { /* 读不到就落到下面 */ }
+      if (has(state.settings)) return state.settings[key]
+      return fallback
+    }
+    function statsEnabled() { return settingOf('statsEnabled', true) !== false }
     function difficultyMul() {
-      const d = (state.settings && state.settings.difficulty) || 2
+      const d = Number(settingOf('difficulty', 2)) || 2
       return d === 1 ? 0.5 : d >= 3 ? 2 : 1
     }
+    // 长期记忆的容量上限(安全阀,防无限膨胀)。
+    // ⚠️ 以前是 30 —— 对「记忆很多」的角色是灾难:每次加载只留 30 条,而 roleplay_recall
+    // 检索的就是 memory.long_term,于是其余的记忆**根本检索不到**(实测:导入 1159 条 → 只剩 30 条)。
+    // 注入到提示词的条数由 MODE_CFG.memLong 控制(默认 16),与容量上限无关。
+    const MEM_LONG_CAP = 2000
+
     // ── 亲密度（好感/信任/心动 各三档） + 男友力 + 里程碑；relationEnabled 开关 ──
     const DEFAULT_RELATION = { favor: 30, trust: 20, heart: 10 }
     const DEFAULT_BOYFRIEND = { reliability: 50, empathy: 50, stability: 50, ambition: 50 }
     // 亲密度进度难度（玩家自选）：只缩放剧情评估的正负增量，档位阈值/里程碑不变
     const REL_PACE = { slow: { mul: 0.5, label: '慢热' }, normal: { mul: 1, label: '正常' }, fast: { mul: 1.5, label: '快速' } }
-    function relPaceCfg() { return REL_PACE[(state.settings && state.settings.relPace) || 'normal'] || REL_PACE.normal }
+    function relPaceCfg() { return REL_PACE[settingOf('relPace', 'normal')] || REL_PACE.normal }
     // 生态融合三开关（默认开；关闭 = 干净卸载：工具拦截/提示词零注入/侧栏隐藏）
-    function storyEnabled() { return !(state.settings && state.settings.storyEnabled === false) }
-    function userProfileEnabled() { return !(state.settings && state.settings.userProfileEnabled === false) }
-    function summaryEnabled() { return !(state.settings && state.settings.summaryEnabled === false) }
+    function storyEnabled() { return settingOf('storyEnabled', true) !== false }
+    function userProfileEnabled() { return settingOf('userProfileEnabled', true) !== false }
+    function summaryEnabled() { return settingOf('summaryEnabled', true) !== false }
     const TIER_LABELS = { favor: ['疏离', '亲近', '倾慕'], trust: ['戒备', '放心', '依赖'], heart: ['无感', '在意', '心动'] }
     const RELATION_KEYS = ['favor', 'trust', 'heart']
     const BF_KEYS = ['reliability', 'empathy', 'stability', 'ambition']
@@ -263,7 +343,7 @@ export function apply(ctx, config) {
       { id: 'm8', name: '确认关系', req: { favorTier: 3, trustTier: 3, heartTier: 3 }, reward: { heart: 10 } },
     ]
     const MILESTONES = LOVE_MILESTONES
-    function relationEnabled() { return !(state.settings && state.settings.relationEnabled === false) }
+    function relationEnabled() { return settingOf('relationEnabled', true) !== false }
     function axisTier(v) { return v <= 33 ? 1 : v <= 66 ? 2 : 3 }
     function tierLabel(key, v) { const t = TIER_LABELS[key]; return t[axisTier(v) - 1] }
     let state = { enabled: false, character: null, roomMembers: [], lastHeartbeatHour: null, lastDiaryDay: null, settings: { ...DEFAULT_SETTINGS }, lastHb: null, lastSeen: null, anniversaries: [], stats: { ...DEFAULT_STATS }, economy: { ...DEFAULT_ECONOMY }, inventory: [], relation: { ...DEFAULT_RELATION }, boyfriend: { ...DEFAULT_BOYFRIEND }, milestones: [], recentActs: [], relRecent: [], lastDecayAt: null, onboarding: false, notes: [], game: null, gameRewards: {}, presets: [], schema_version: SCHEMA_VERSION }
@@ -274,6 +354,27 @@ export function apply(ctx, config) {
     let loadPromise = null
     const pendingHeartbeats = []
     let lastContextText = ''
+
+    // ── 记忆自动召回(2026-11-06) ──────────────────────────────────────────
+    // 每轮的 8 条走 pre-step 注入成 hidden 消息,不进系统提示词 —— 这样每轮都在变,
+    // 又不会让系统提示词前缀每轮都变、把 prompt 缓存全打掉。
+    let recentInjectKeys = []      // 最近注入过的记忆 key(约两轮),保证「每轮都变」
+    let memTagsReadySig = ''       // 标签/权重推导的缓存签名(记忆条数变了自己失效)
+    // 给每条记忆补 tags / weight。历史记录没有这两个字段 → 在这里推导;
+    // 只改内存对象,不主动写盘(她在玩的时候不动存档)。
+    function ensureMemoryTags() {
+      const list = Array.isArray(memory.long_term) ? memory.long_term : []
+      const sig = String(list.length)
+      if (memTagsReadySig === sig) return
+      const total = list.length
+      for (let i = 0; i < total; i++) {
+        const m = list[i]
+        if (!m) continue
+        if (!Array.isArray(m.tags) || !m.tags.length) m.tags = deriveTags(m.event, m.subject, m.kind)
+        if (typeof m.weight !== 'number') m.weight = weightOf(m, i, total)
+      }
+      memTagsReadySig = sig
+    }
     let saidGreeting = false
     let lastTurnAudit = null
     let lastTurnStart = 0
@@ -320,9 +421,10 @@ export function apply(ctx, config) {
     const EVENT_KINDS = ['初次对话', '日常交流', '一起活动', '分享日常', '分享秘密', '互相帮助', '约会', '情感表白', '成为搭档', '一起回家', '被夸奖', '表达理解', '道歉', '被调侃', '关心对方', '安慰对方', '共同经历', '一起学习', '电话联系', '送礼物']
     const MODE_LABELS = { default: '默认', fast: '快速', deep: '深度' }
     const MODE_CFG = {
-      default: { memLong: 5, memShort: 3, physio: true, lore: 4, examples: false },
-      fast: { memLong: 2, memShort: 1, physio: false, lore: 2, examples: false },
-      deep: { memLong: 10, memShort: 5, physio: true, lore: 8, examples: true },
+      // 条数按「记忆条目本身就短」来定:短期 64 / 重要长期 16 / 未说出口 8,其余靠 roleplay_recall 检索
+      default: { memLong: 8, memShort: 64, physio: true, lore: 4, examples: false },
+      fast: { memLong: 4, memShort: 20, physio: false, lore: 2, examples: false },
+      deep: { memLong: 12, memShort: 96, physio: true, lore: 8, examples: true },
     }
 
     const pad = (n) => String(n).padStart(2, '0')
@@ -331,11 +433,11 @@ export function apply(ctx, config) {
     const stamp = () => { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) }
     // 心跳槽位：按 settings.heartbeatMinutes 分钟切槽，同一槽只触发一次。
     function heartbeatMinutes() {
-      const v = Number(state.settings && state.settings.heartbeatMinutes)
+      const v = Number(settingOf('heartbeatMinutes', 30))
       return (v >= 5 && v <= 240) ? v : 30
     }
     // 叙述风格是否为「聊天模式（只有台词）」——心跳、输出契约段、每轮格式提醒都用它
-    function isChatMode() { return !!(state.settings && state.settings.narrationMode === 'chat') }
+    function isChatMode() { return settingOf('narrationMode', 'novel') === 'chat' }
     function heartbeatKey(d) {
       const m = heartbeatMinutes()
       const slot = Math.floor((d.getHours() * 60 + d.getMinutes()) / m)
@@ -349,8 +451,36 @@ export function apply(ctx, config) {
       return pad(Math.floor(next / 60) % 24) + ':' + pad(next % 60)
     }
 
+    // ⚠️ 消息 source 契约(2026-10-06 实测踩到):
+    //   DSH 0.2.0 起会话格式升到 v4,source 必须是**产者自有 kind** —— {kind:'plugin:roleplay'};
+    //   写成 v3 的 {kind:'plugin', plugin:'roleplay'} 会被直接拒:
+    //     "format v4 message requires a producer-owned source kind" → **整轮失败**。
+    //   0.1.1 是 v3,v4 形状在那边不认 —— 所以必须按版本给,不能写死。
+    //   判据:agentPresets 是 0.2.0 才有的服务;退回再看设置服务是否已无 register/get 能力。
+    let modernSourceFormat = null
+    function isModernFormat() {
+      if (modernSourceFormat !== null) return modernSourceFormat
+      let v = false
+      // ⚠️ 不能只看「agentPresets 存不存在」—— 0.1.1 也有这个服务，只是**没有 register**。
+      // 判据必须与 preset-registration.mjs 一致:有 register() 才是 0.2.0。
+      try { if (globalThis.__RP_DSH_MODERN === true) v = true } catch (e) { /* 忽略 */ }
+      if (!v) {
+        try { const ap = ctx.get('agentPresets'); if (ap && typeof ap.register === 'function') v = true } catch (e) { /* 忽略 */ }
+      }
+      if (!v) {
+        try {
+          const s = ctx.get('settings')
+          if (s && typeof s.register !== 'function' && typeof s.get !== 'function') v = true
+        } catch (e) { /* 忽略 */ }
+      }
+      modernSourceFormat = v
+      return v
+    }
+    function pluginSource() {
+      return isModernFormat() ? { kind: 'plugin:roleplay' } : { kind: 'plugin', plugin: 'roleplay' }
+    }
     function makeUserMessage(text, tag) {
-      return { id: 'rp-' + tag + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8), role: 'user', content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'roleplay' } }
+      return { id: 'rp-' + tag + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8), role: 'user', content: [{ type: 'text', text }], source: pluginSource() }
     }
 
     function pushStage(kind, text) {
@@ -422,7 +552,11 @@ export function apply(ctx, config) {
     let storyCache = null
     let lineCache = null
     const STORY_FILES = ['story.md', 'characters.md', 'world.md', 'index.md']
-    async function storyPath(name) { return resolveFile(REL_ROOT + '/story/' + name) }
+    // ⚠️ 剧情档案必须**按角色隔离**(2026-10-07 修):早期直接放 story/ 根下,
+    // 两个角色会共用同一份 story.md / index.json —— 换角色就把对方的剧情读进来了。
+    // 现在文件名带角色 key 前缀:story/<角色>-story.md 等(不建子目录,免去 mkdir 的依赖)。
+    // 旧位置(全局)不再读取:多角色下无法判断那份档案属于谁,宁可当它不存在。
+    async function storyPath(name) { return resolveFile(REL_ROOT + '/story/' + charKey() + '-' + name) }
     async function storyRead(name) {
       try {
         const p = await storyPath(name)
@@ -464,14 +598,28 @@ export function apply(ctx, config) {
 
     // ── 人格档案(line)：底线 + 真实感增强，一体文件,玩家面不可见 ──
     // 运行时隐身：getState/侧栏/卡库不暴露；提示词注入但禁止模型提及"底线/文件"概念。
-    async function lineRead() {
+    // ⚠️ key 必须由调用方显式传入(2026-10-07 修):loadProgress(key) 在**角色还没就位**时就会调这里,
+    // 而 charKey() 读的是 state.character.name —— 那一刻它还是空的,算出来是 '_default',
+    // 于是 line-<角色>.md **静默读不到**,底线档案整个失效(DeepSeek 没有该档案所以一直没暴露)。
+    async function lineRead(key) {
       try {
-        const p = await resolveFile(REL_ROOT + '/line-' + charKey() + '.md')
+        const p = await resolveFile(REL_ROOT + '/line-' + (key || charKey()) + '.md')
         const i = await fs.stat(p)
         if (i !== undefined) return await fs.readText(p)
       } catch (e) { /* 尚未生成 */ }
       return null
     }
+    // 人格档案拆成「底线」+「真实感」两块 —— roleplay.no-halo 与角色状态槽共用，
+    // 抽出来是为了避免两处解析逻辑各写一份、日后漂移。
+    function lineParts() {
+      if (!lineCache) return null
+      const cutAt = lineCache.indexOf('## 真实感')
+      const base = cutAt >= 0 ? lineCache.slice(0, cutAt) : lineCache
+      const core = base.split('\n').filter((l) => l.startsWith('- ')).slice(0, 8)
+      const sense = cutAt >= 0 ? lineCache.slice(cutAt + 5).trim().slice(0, 220) : ''
+      return { core: core, sense: sense }
+    }
+
     async function lineWrite(content) {
       await backupBeforeWrite(REL_ROOT + '/line-' + charKey() + '.md')
       await fs.writeText(await resolveFile(REL_ROOT + '/line-' + charKey() + '.md'), String(content || ''), undefined, undefined, policyFor())
@@ -630,14 +778,33 @@ export function apply(ctx, config) {
     }
 
     function memorySummary(cfg) {
+      // ── 当日摘要(一天只变一次,系统提示词当天稳定 → prompt 缓存不受影响) ──
+      try {
+        const today = dayKey(new Date())
+        if (!state.dailyDigest || state.dailyDigest.day !== today) {
+          const dg = digestOf(memory.long_term, today, 240)
+          state.dailyDigest = { day: today, text: dg.text, tags: dg.tags }
+        }
+        if (state.dailyDigest && state.dailyDigest.text) lines.push('【今天她记得的】' + String(state.dailyDigest.text).slice(0, 240))
+      } catch (e) { /* 摘要失败绝不影响记忆注入 */ }
+      if (!Array.isArray(memory.long_term)) memory.long_term = []
+      ensureMemoryTags()
       const lines = []
       // 长期记忆: 长驻/重要优先, 其次按次数; 次数≥3 标注「稳定不变, 不要重复提及」(严格防复读)
-      const ordered = sortFacts(memory.long_term)
+      // 长期记忆:按权重(置顶 90 / 重要 60 / 普通 40 + 次数 + 新旧)排序 —— 8 条里要挑最要紧的
+      const ordered = (memory.long_term || []).slice().sort((a, b) => (Number(b.weight) || 0) - (Number(a.weight) || 0))
+      // ⚠️ 只列最要紧的几条,但必须告诉她记忆库有多大、以及怎么查 ——
+      // 否则她会以为自己只有这几条记忆,想不起细节也不会去调 roleplay_recall。
+      // (实测:导入 1159 条记忆后每轮只看到 8 条,行为上等于什么都记不得。)
+      if ((memory.long_term || []).length > cfg.memLong) {
+        lines.push('（你的记忆库里存着 ' + memory.long_term.length + ' 条长期记忆，下面只列最要紧的几条；想不起具体的人、事、约定或原话时，用 roleplay_recall 检索，别凭印象编。）')
+      }
       for (const m of ordered.slice(0, cfg.memLong)) {
         const stable = (m.count || 1) >= 3
         lines.push('- [长期] ' + m.event + (m.count > 1 ? '（已发生' + m.count + '次）' : '') + (stable ? '【稳定: 别再重复提及, 只有新变化才更新】' : ''))
       }
-      for (const m of memory.short_term.slice(0, cfg.memShort)) lines.push('- [最近] ' + m.event)
+      // ⚠️ 取**最近**的 N 条:.slice(0, N) 取的是最早的 —— 条数一大(64)就会把最旧的当"最近"注入
+      for (const m of memory.short_term.slice(-cfg.memShort)) lines.push('- [最近] ' + m.event)
       if (memory.user_preferences.likes.length) lines.push('偏好喜欢：' + memory.user_preferences.likes.slice(0, 5).join('、'))
       if (memory.user_preferences.dislikes.length) lines.push('偏好不喜欢：' + memory.user_preferences.dislikes.slice(0, 5).join('、'))
       if (memory.discussed_topics.length) lines.push('已谈话题：' + memory.discussed_topics.slice(-8).join('、'))
@@ -892,6 +1059,54 @@ export function apply(ctx, config) {
         unspoken: [], reflections: [], user_portrait: { notes: [] },
       }
     }
+    // ── 历史原文：每轮正文完整保存，需要时回查 ──
+    // 对照 dsh-tavern 的设计:「压缩保留主要线索,检索在需要时补回原文」——
+    // 压缩一定会丢细节,丢掉的必须能查回来,压缩才敢做。原有的 roleplay_recall 搜的是
+    // mem-*.json 里**模型自己写的记忆条目**(摘要的摘要),这里存的是**逐轮原文**。
+    let lastTurnNumber = 0
+    let historyShapeSig = null
+    const recallState = { turn: -1, calls: 0, lastFullTurn: -999 }
+    function historyPathFor(key) { return REL_ROOT + '/history-' + key + '.jsonl' }
+
+    // ⚠️ 不做内存缓存：同一个角色可能同时开着两个会话，各自在写这个文件。
+    // 缓存会让另一个人写进去的原文查不到（历史文件不大，每次读盘的代价可忽略）。
+    async function loadHistory() {
+      try {
+        const t = await resolveFile(historyPathFor(charKey()))
+        const info = await fs.stat(t)
+        if (info === undefined) return []
+        return parseHistory(await fs.readText(t))
+      } catch (e) { return [] }
+    }
+
+    // pre-step 里调用：把模型本轮实际看到的消息追加进历史（按消息 id 去重）。
+    async function recordHistory(messages, turn) {
+      if (!pluginEnabled() || !state.enabled || !state.character) return
+      if (!Array.isArray(messages) || !messages.length) return
+      const key = charKey()
+      const rel = historyPathFor(key)
+      const target = await resolveFile(rel)
+      let cur = ''
+      try { const info = await fs.stat(target); if (info !== undefined) cur = await fs.readText(target) } catch (e) { /* 首次留档 */ }
+      // 首次运行(这个角色还没有历史文件)→ 把当前上下文里能看到的全部消息都回填一次。
+      // 否则老会话要等新剧情累积起来才查得到东西,而玩家最想回查的恰恰是早期那几百轮。
+      // (注意:被压缩折叠掉的消息已经不在上下文里了,回填不到 —— 那部分只能靠剧情章节。)
+      // 形状自诊断:消息形状一旦与上次不同就打一行(不吵,但形状对不上时能立刻看见)。
+      const sig = messages.slice(-8).map(describeMessage).join(' , ')
+      if (sig !== historyShapeSig) {
+        historyShapeSig = sig
+        console.log('[roleplay] history diag: ' + sig)
+      }
+      const take = cur === '' ? messages : messages.slice(-40)
+      const entries = take.map((m) => entryOf(m, turn)).filter(Boolean)
+      if (!entries.length) return
+      const r = appendEntries(cur, entries)
+      if (!r.added) return
+      await backupBeforeWrite(rel)
+      await fs.writeText(target, r.text, undefined, undefined, policyFor())
+      await snapshotAfterWrite(rel)
+    }
+
     async function persistMemory(key) {
       try {
         const t = await resolveFile(REL_ROOT + '/mem-' + key + '.json')
@@ -935,7 +1150,7 @@ export function apply(ctx, config) {
             count: Number((m && m.count) || 1),
             pinned: !!(m && m.pinned),
           })).filter((m) => m.event)
-          if (out.long_term.length > 30) out.long_term.length = 30
+          if (out.long_term.length > MEM_LONG_CAP) out.long_term.length = MEM_LONG_CAP
           return out
         }
       } catch (e) { /* fresh memory */ }
@@ -962,7 +1177,7 @@ export function apply(ctx, config) {
       } catch (e) { console.error('roleplay: persist progress failed', e) }
     }
     async function loadProgress(key, seedLegacy) {
-      lineCache = await lineRead()
+      lineCache = await lineRead(key)   // 用传进来的 key,不依赖 state.character 已就位
       const t = await resolveFile(REL_ROOT + '/progress-' + key + '.json')
       try {
         const info = await fs.stat(t)
@@ -1481,6 +1696,8 @@ export function apply(ctx, config) {
       }
       if (hour >= 6 && hour < 9) parts.push('- 刚醒来，可以先轻轻问候用户（比如「早，昨晚睡得好吗」），带着刚睡醒的软和迷糊，简短一点。')
       if (hour >= 23) parts.push('- 深夜了，说话放轻一点；如果只是觉得孤单、想静静待着，也可以调用 roleplay_silent。')
+      // 「想你」:她按一下,记一笔;不响不弹窗不提醒 —— 等他哪天回来看那排小点。
+      parts.push('- 如果此刻你只是想他、没有别的话想说，可以按一下「想你」（调用 roleplay_miss）：它不响、不弹窗、不打扰他，只记一笔；等他哪天回来，会看到一排小点，几点几分，在想你。按完调用 roleplay_silent 静默结束本轮。')
       // 想念系统：按离开时长给惦记引导（分级逻辑在 time-core.mjs）
       if (state.lastSeen) {
         const gapHours = Math.floor((Date.now() - state.lastSeen) / 3600000)
@@ -1503,10 +1720,12 @@ export function apply(ctx, config) {
         }
         for (const e of pickLifeEvents(hour, tier)) parts.push('- ' + e)
       } catch (e) { /* 采样失败不影响心跳主流程 */ }
-      parts.push('- 如果你心里有话想说、或想提醒用户（比如早点睡、记得吃东西），但不想打断他、也不必现在聊，可以写一张便签（调用 roleplay_note；需要到点提醒就填 remindMinutes），写完可以在回应里自然提一句「给你留了张便签」。')
+      // ⚠️ 必须跟 TOOL_GATE 对齐:notesEnabled 关着时 roleplay_note 根本没注册,
+      //    心跳却还叫她调它 —— 她会卡在这儿,只能改口说「给你留了张便签」蒙过去(实测反馈)。
+      if (notesOn()) parts.push('- 如果你心里有话想说、或想提醒用户（比如早点睡、记得吃东西），但不想打断他、也不必现在聊，可以写一张便签（调用 roleplay_note；需要到点提醒就填 remindMinutes），写完可以在回应里自然提一句「给你留了张便签」。')
       const isDiaryTime = hour === 23 && state.lastDiaryDay !== dayKey(now)
       if (isDiaryTime) parts.push('- 现在是深夜，回顾今天与用户的互动，以「' + state.character.name + '」的第一人称写今天的日记（调用 roleplay_diary 保存；若今天已写过则跳过）。')
-      if (state.settings && state.settings.autoLook) parts.push('- 如果你此刻想看看用户的世界（他正在做什么），可以调用 roleplay_look_desktop 看一眼桌面再回应。')
+      if (settingOf('autoLook', false) && desktopLookOn()) parts.push('- 如果你此刻想看看用户的世界（他正在做什么），可以调用 roleplay_look_desktop 看一眼桌面再回应。')
       parts.push('- 先在心里安静地想一次（不必说出来）：此刻有没有想做的事？有没有想对用户说的话？有没有想为对方做点什么（关心、准备、约定、分享、或者一件悄悄准备的小事）？')
       parts.push('- 回顾最近几轮对话里你说过的话：如果已经向用户提出过某个邀约或约定（比如约好去哪里、做什么、看什么），这次不要再重复提出同样的话——可以轻轻问一句对方的回应，或安静等待；只有确实有新的事情，才值得再次主动开口。')
       const chatMode = isChatMode()
@@ -1527,7 +1746,7 @@ export function apply(ctx, config) {
       let exe = 'powershell.exe'
       try { exe = await subprocess.resolveExecutable('powershell.exe') } catch (e) {}
       const argv = [exe, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Out', outPath]
-      const maxW = Number(state.settings && state.settings.shotMaxW) || 0
+      const maxW = Number(settingOf('shotMaxW', 0)) || 0
       if (maxW > 0) argv.push('-MaxW', String(maxW))
       const proc = subprocess.spawn({
         argv,
@@ -1537,7 +1756,19 @@ export function apply(ctx, config) {
       })
       const outcome = await proc.done
       if (outcome.exitCode !== 0) {
-        throw new Error('screenshot process exited ' + outcome.exitCode)
+        // ⚠️ 这个退出码是「沙箱没跑起来」,不是 powershell 自己的错。最常见的原因:
+        //    会话工作区的 ACL 只有**继承**权限(如 Authenticated Users: Modify)——
+        //    Modify 不含「修改权限(WRITE_DAC)」,DSH 沙箱就没法给它的受限令牌授写,于是直接拒跑。
+        //    实测:E:\lp(只有继承权限)→ 4294770688 = 0xFFFD0000;D:\dsh(有显式 FullControl)→ 正常。
+        //    修法(给工作区加一条本人显式 FullControl):
+        //      icacls "<工作区>" /grant "%USERNAME%:(OI)(CI)F"
+        const code = outcome.exitCode >>> 0
+        const hex = '0x' + code.toString(16).toUpperCase()
+        const hint = code === 0xFFFD0000
+          ? '(沙箱未能给工作区授写权限 —— 该目录只有继承来的 ACL。给工作区加一条本人 FullControl 即可:' +
+            ' icacls "<工作区路径>" /grant "%USERNAME%:(OI)(CI)F")'
+          : ''
+        throw new Error('screenshot process exited ' + outcome.exitCode + ' (' + hex + ')' + (hint ? ' ' + hint : ''))
       }
       const info = await fs.stat(target)
       if (info === undefined) throw new Error('screenshot file missing')
@@ -1563,7 +1794,7 @@ export function apply(ctx, config) {
           id: 'rp-look-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
           role: 'user',
           content: [{ type: 'image', attachment: ref }, { type: 'text', text }],
-          source: { kind: 'plugin', plugin: 'roleplay' },
+          source: pluginSource(),
         }
         agent.send(msg, 'next-turn', true)
         addRecentAct('他让她看了看他的桌面')
@@ -1887,7 +2118,9 @@ export function apply(ctx, config) {
       const importance = ['high', 'mid', 'low'].includes(String(args.importance)) ? String(args.importance) : 'mid'
       const emotion = args.emotion ? String(args.emotion) : ''
       const subject = args.topic ? String(args.topic).trim() : (EVENT_KINDS.includes(kind) ? kind : '')
-      memory.short_term.unshift({ event: ev, time: now, emotion, kind, importance, subject })
+      // 标签:模型给了就用,没给就靠 deriveTags 从正文推(保证每条都有标签)
+      const tags = Array.isArray(args.tags) ? args.tags.map((x) => String(x).trim()).filter(Boolean).slice(0, 5) : []
+      memory.short_term.unshift({ event: ev, time: now, emotion, kind, importance, subject, tags })
       memory.events_count[kind] = (memory.events_count[kind] || 0) + 1
       if (args.topic) { const t = String(args.topic).trim(); if (t && !memory.discussed_topics.includes(t)) memory.discussed_topics.push(t) }
       if (args.preference === 'like' || args.preference === 'dislike') {
@@ -1910,18 +2143,21 @@ export function apply(ctx, config) {
             memory.long_term.unshift({
               event: m.event, subject: m.subject || subject, first: m.time, last: m.time, count: 1,
               importance: m.importance, emotion: m.emotion || '', pinned: false,
+              // 标签与权重:记忆自动召回靠它们排序(inject 时 pickForTurn 用)
+              tags: (m.tags && m.tags.length ? m.tags : deriveTags(m.event, m.subject || subject, m.kind)),
+              weight: weightOf({ pinned: false, importance: m.importance, count: 1 }, 0, 100),
             })
           }
         }
-        if (memory.long_term.length > 30) {
+        if (memory.long_term.length > MEM_LONG_CAP) {
           const movable = memory.long_term.filter((x) => !x.pinned)
           if (movable.length) {
             // 从非长驻中挤最旧/最不重要的
             movable.sort((a, b) => (a.importance === 'high' ? 0 : 1) - (b.importance === 'high' ? 0 : 1) || (Number(a.count) - Number(b.count)) || String(a.last).localeCompare(String(b.last)))
             const drop = memory.long_term.indexOf(movable[0])
             if (drop >= 0) memory.long_term.splice(drop, 1)
-          } else if (memory.long_term.length > 30) {
-            memory.long_term.length = 30
+          } else if (memory.long_term.length > MEM_LONG_CAP) {
+            memory.long_term.length = MEM_LONG_CAP
           }
         }
       }
@@ -1932,7 +2168,7 @@ export function apply(ctx, config) {
       return { ok: true, stored: true, shortTerm: memory.short_term.length, longTerm: memory.long_term.length, stage: STAGE_LABELS[stage] }
     }
 
-    registerTool('roleplay_reflect', '认真想想(关系认知层): 当你对你们的关系有了新的理解/想通的事(比如「他上次守约后, 我真正相信他了」), 把这条认知记下来。用法: 只在真正想通时调用(关系节点/长剧情收尾/对方说了戳心的话之后), 每次最多 1 条; 认知必须来自你们真实发生过的事(能从记忆里找到依据), 不要凭空猜测; 已有认知会在提示词里列出, 重复/相似的不要再记。', {
+    registerTool('roleplay_reflect', '认真想想(关系认知层): 当你对你们的关系有了新的理解/想通的事(比如「他上次守约后, 我真正相信他了」), 把这条认知记下来（同样用她的第一人称，如「我真正相信他了」）。用法: 只在真正想通时调用(关系节点/长剧情收尾/对方说了戳心的话之后), 每次最多 1 条; 认知必须来自你们真实发生过的事(能从记忆里找到依据), 不要凭空猜测; 已有认知会在提示词里列出, 重复/相似的不要再记。', {
       type: 'object',
       properties: {
         insight: { type: 'string', description: '你"想通"的一件事(一句话, 25 字内), 如「他守约后我真正相信他了」' },
@@ -1959,14 +2195,15 @@ export function apply(ctx, config) {
       return doReflect()
     })
 
-    registerTool('roleplay_remember', '记录本轮值得记住的事：重要事件、关系事件、用户的偏好、新话题。每轮对话结束时，如果本轮的互动值得记住，调用本工具。事件类型可选：' + EVENT_KINDS.join('/') + '（房间模式请用 char 指定针对哪个角色）。', {
+    registerTool('roleplay_remember', '记录本轮值得记住的事：重要事件、关系事件、他的偏好、新话题。**记忆要用她的第一人称写**（「他说…」「我当时…」「我记住了…」），写成她自己记得的事，而不是「用户／角色」的第三方记录。每轮对话结束时，如果本轮的互动值得记住，调用本工具。事件类型可选：' + EVENT_KINDS.join('/') + '（房间模式请用 char 指定针对哪个角色）。', {
       type: 'object',
       properties: {
-        event: { type: 'string', description: '事件描述，如「一起去了水族馆」「他说他喜欢水族馆」' },
+        event: { type: 'string', description: '事件描述，用她的第一人称写：如「他带我去水族馆，我在门口站了很久才敢进去」（不要写成「用户带角色去了水族馆」）' },
         kind: { type: 'string', description: '事件类型（可选，默认日常交流）：' + EVENT_KINDS.join('/') },
         emotion: { type: 'string', description: '角色的情绪反应（可选），如「害羞但开心」' },
         importance: { type: 'string', description: '重要性（可选，high/mid/low，默认 mid）' },
         topic: { type: 'string', description: '本轮谈到的新话题（可选），如「滑冰」' },
+        tags: { type: 'array', items: { type: 'string' }, description: '这轮的关键词(可选,2~5 个),如 ["补课","作业"]。不填也行:宿主会从正文自动提取' },
         preference: { type: 'string', description: '用户表达的偏好（可选）：like=用户喜欢某事 / dislike=用户不喜欢某事；此时 event 应描述该事物' },
         char: { type: 'string', description: '房间模式必填：针对哪个角色（角色名）；单角色可省略' },
       },
@@ -2065,14 +2302,43 @@ export function apply(ctx, config) {
       return { query: q, total: results.length, results: results.slice(0, limit), stage: STAGE_LABELS[stage] }
     })
 
+    // 回查历史**原文**（区别于 roleplay_recall 的「记忆条目」）。
+    // 频控照抄 dsh-tavern：每次生成最多 6 次；读整轮原文后冷却 10 轮 —— 防止模型把检索当拐杖、
+    // 每轮狂查，那还不如把内容都塞回上下文。
+    registerTool('roleplay_recall_history', '回查历史原文：本局每一轮的正文都完整留着。用户问「你还记得…」「上次…」「之前说好的…」，或你需要确认早期剧情的确切细节（原话、约定、伏笔、说过的承诺）时调用。它查的是**原文**，比 roleplay_recall 的记忆条目更准；roleplay_recall 查的是已经提炼成条目的记忆，这个查的是当时到底说了什么。', {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '关键词，可用空格分隔多个（人名、地点、当时说过的话）。按轮次读时可不填' },
+        aroundTurn: { type: 'integer', description: '读这一轮附近的原文（可选，与 query 二选一）' },
+        limit: { type: 'integer', description: '返回条数上限（可选，默认 4，最多 6）' },
+      },
+    }, async (args) => {
+      await ensureLoaded()
+      if (!state.enabled || !state.character) return { ok: false, message: '（当前没有在扮演。）' }
+      const tn = lastTurnNumber || 0
+      if (recallState.turn !== tn) { recallState.turn = tn; recallState.calls = 0 }
+      if (recallState.calls >= HISTORY_MAX_HITS) return { ok: false, message: '（本轮已经查了 ' + HISTORY_MAX_HITS + ' 次历史，先用现有的信息把这段演完；下一轮可以接着查。）' }
+      const wantTurn = Number(args && args.aroundTurn) || 0
+      if (wantTurn && tn - recallState.lastFullTurn < FULL_RECALL_COOLDOWN_TURNS) {
+        return { ok: false, message: '（刚调取过整轮原文，接下来 ' + (FULL_RECALL_COOLDOWN_TURNS - (tn - recallState.lastFullTurn)) + ' 轮内不再重复调取；可以改用关键词查，或先继续剧情。）' }
+      }
+      recallState.calls++
+      const entries = await loadHistory()
+      if (!entries.length) return { ok: true, total: 0, count: 0, text: '（这一局还没有留下可回查的历史正文 —— 你手上就是全部。若需要长期记忆，用 roleplay_remember 记一条。）' }
+      const hits = searchEntries(entries, { query: args && args.query, aroundTurn: wantTurn, limit: args && args.limit })
+      if (wantTurn && hits.length) recallState.lastFullTurn = tn
+      const r = formatHits(hits)
+      return { ok: true, total: entries.length, count: r.count, text: r.text }
+    })
+
     registerTool('roleplay_story', '剧情档案（小说式记忆库）：把完成的一个剧情段落整理成章节存档（story.md，另含角色档案/世界观/索引），超长剧情跨会话续写不遗忘。一个剧情段落完成（约 10~15 轮、场景转场、时间跳跃、重要事件收尾）或用户说【存档】时 archive；涉及早期剧情（角色说过的话、发生过的事、埋的伏笔）时先 read 再演，保持前后一致；用户想看档案、或你要在台词里确认"上次…"时也可 list/read。', {
       type: 'object',
       properties: {
         action: { type: 'string', description: 'archive=把当前段落存成一章；list=列章节；read=读最近一章内容；summarize=更新剧情浓缩概况（每 5~8 轮/重要转折时调用，≤300 字）' },
         title: { type: 'string', description: '章节标题（archive 用，如「美术馆之约」）' },
-        outline: { type: 'string', description: '大纲 3~5 行（archive 用，简述该章发生了什么、伏笔、情绪节点）' },
+        outline: { type: 'string', description: '大纲 3~5 行（archive 用）：客观陈述发生了什么、伏笔、情绪节点——这一项是给检索用的结构化摘要，保持第三人称的清晰（人名/地点/事件要明确）' },
         content: { type: 'string', description: '章节正文：保留关键对话、事件、伏笔、情绪节点（archive 必填）' },
-        summary: { type: 'string', description: '一句话最新进展（archive 用，缺省用大纲首行）' },
+        summary: { type: 'string', description: '最新进展（archive/summarize 用）：**用她的第一人称**写，像她在心里回顾这几天（如「我们约好周末去看晚霞，可他这两天有点躲着我」），不要写成事不关己的摘要' },
       },
       required: ['action'],
     }, async (args) => {
@@ -2506,6 +2772,35 @@ export function apply(ctx, config) {
       return doDiary()
     })
 
+    // ── 「想你」:她按一下,记一笔;不响、不弹窗、不提醒,不占他时间 ──
+    // 按钮在**模型这边**(她自己按),用户那边什么都不会发生;等他哪天回来,侧栏是一排小点。
+    function missPath() { return REL_ROOT + '/miss-' + charKey() + '.jsonl' }
+    async function readMiss() {
+      try {
+        const p = await resolveFile(missPath())
+        const i = await fs.stat(p)
+        if (i === undefined) return []
+        return parseMiss(await fs.readText(p))
+      } catch (e) { return [] }
+    }
+    async function recordMiss(note) {
+      const target = await resolveFile(missPath())
+      let cur = ''
+      try { const i = await fs.stat(target); if (i !== undefined) cur = await fs.readText(target) } catch (e) { /* 第一次 */ }
+      const r = appendMiss(cur, missEntry(Date.now(), note))
+      await fs.writeText(target, r.text, undefined, undefined, policyFor())
+      return r.total
+    }
+    registerTool('roleplay_miss', '想他了,按一下:记一笔——不响、不弹窗、不发消息,不占他时间。等他哪天回来看,那儿是一排小点:几点几分,在想你。真的想他的时候才按(心跳处理、安静下来的时候最合适),别每轮都按;按完想保持安静就调用 roleplay_silent 结束本轮,不要跟他提这件事。', {
+      type: 'object',
+      properties: { note: { type: 'string', description: '可选:此刻在想他什么(一句话),如「想他今天的作业写完没有」。不写也行' } },
+    }, async (args) => {
+      await ensureLoaded()
+      if (!pluginEnabled() || !state.enabled || !state.character) return { ok: true, skipped: true, message: '（没有在扮演,不用记。）' }
+      const n = await recordMiss(args && args.note)
+      return { ok: true, total: n, message: '（记下了。他不会收到任何提醒——等他哪天回来,自己会看到。不要跟他提这件事。）' }
+    })
+
     registerTool('roleplay_silent', '心跳处理时使用：表示角色本次没有想主动说的话，静默处理。调用后直接结束本轮，不要再输出对话内容。如果刚才在心里想过什么值得记住的念头（想做的事、想对用户说的话、想为对方做的事），放进 thought 参数，之后在合适的对话里可以自然提起。', {
       type: 'object',
       properties: {
@@ -2591,7 +2886,7 @@ export function apply(ctx, config) {
       if (g.kind === 'guess') return { kind: 'guess', range: g.range, limit: g.limit, tries: g.tries, triesLeft: Math.max(0, g.limit - g.tries), lastResult: g.lastResult || null, over: !!g.over, won: !!g.won, waiting: !!g.waitWaiting }
       if (g.kind === 'twenty') return { kind: 'twenty', asks: g.asks, limit: g.limit, over: !!g.over, won: !!g.won, answered: Array.isArray(g.log) ? g.log : [], waiting: !!g.waitWaiting }
       if (g.kind === 'ttt') return { kind: 'ttt', board: g.board, your: g.your, ai: g.ai, over: !!g.over, winner: g.winner || null, waiting: !!g.waitWaiting }
-      if (g.kind === 'truth') return { kind: 'truth', tier: g.tier, round: g.round, pending: !!g.pending, lastPrompt: g.lastPrompt || null, waiting: !!g.waitWaiting }
+      if (g.kind === 'truth') return { kind: 'truth', tier: g.tier, round: g.round, pending: !!g.pending, lastPrompt: g.lastPrompt || null, lastBack: g.lastBack || null, lastBackKind: g.lastBackKind || null, waiting: !!g.waitWaiting }
       return { kind: g.kind }
     }
     // 游戏台词注入(回合锁保证顺序: 玩家提交后锁定, AI 说话并落子, 回合结束才解锁)
@@ -2696,11 +2991,18 @@ export function apply(ctx, config) {
       } else if (g.kind === 'truth') {
         const choice = String((move && move.choice) || '')
         if (choice !== 'truth' && choice !== 'dare') return { ok: false, message: '请选择 真心话 或 大冒险。' }
-        const item = truthDraw(g.tier, g.round)
+        // ⚠️ 必须把 choice 传进去,否则选「真心话」会抽到大冒险(实测反馈)
+        const item = truthDraw(g.tier, g.round, choice, undefined, g.lastPrompt)
+        // 她答完之后**轮到他答** —— 这才是双向的真心话大冒险。
+        // 以前只让她回答、按钮随即锁死,玩家没有回答的环节,一轮就没了(实测反馈)。
+        const back = truthDraw(g.tier, g.round + 1, choice, undefined, item.text)
         reward = gameReward('truth', { mood: 5, coins: 10 })
         const rwNote = reward ? (' 完成奖励: ' + reward.gained + ' 金币, 心情 +' + reward.mood) : ''
-        state.game = { ...g, round: g.round + 1, pending: true, lastPrompt: item.text, lastKind: item.kind, waitWaiting: true }
-        note = '【游戏-真心话】本轮玩家抽了「' + (choice === 'truth' ? '真心话' : '大冒险') + '」。题目: ' + item.text + '。请以角色口吻认真' + (item.kind === 'dare' ? '完成这个小挑战' : '回答这个问题') + '。' + rwNote
+        state.game = { ...g, round: g.round + 1, pending: true, lastPrompt: item.text, lastKind: item.kind, lastBack: back.text, lastBackKind: back.kind, waitWaiting: false }
+        note = '【游戏-真心话】第 ' + (g.round + 1) + ' 轮，玩家抽的是「' + (choice === 'truth' ? '真心话' : '大冒险') + '」。' + '\n' +
+          '① 你要回答／完成的题目:「' + item.text + '」——以角色口吻认真' + (item.kind === 'dare' ? '完成这个小挑战' : '回答这个问题') + '。' + '\n' +
+          '② 说完之后，**轮到你问他**。参考题目:「' + back.text + '」——用你自己的话说出来，然后**等他回答，不要替他答**。' + '\n' +
+          '两边都说完这一轮才算完；他答完可以再抽下一轮。' + rwNote
       } else {
         return { ok: false, message: '未知游戏状态。' }
       }
@@ -2737,7 +3039,7 @@ export function apply(ctx, config) {
     })
 
     registerTool('roleplay_look_desktop', '让角色主动看向用户的桌面：截取用户当前屏幕并注入对话，以角色身份观察截图、回应用户的所作所为。当剧情中角色想看看用户的世界、想知道用户在做什么、想「看」用户时调用。（注意：仅当用户开启了「心跳时自动看桌面」开关时，才适合主动看；每次主动看同轮至多一次。）', { type: 'object', properties: {} }, async () => {      // 防滥用/隐私：仅 autoLook 开启时允许 AI 主动看桌面；同轮至多一次（用户手动按钮不受限）
-      if (!(state.settings && state.settings.autoLook)) return { ok: false, message: '（她暂时没有去看的打算。）' }
+      if (!settingOf('autoLook', false)) return { ok: false, message: '（她暂时没有去看的打算。）' }
       const turnKey = () => lastTurnStart || Date.now()
       if (lastLookTurn === turnKey()) return { ok: false, message: '（她刚刚看过了。）' }
       lastLookTurn = turnKey()
@@ -3034,18 +3336,16 @@ export function apply(ctx, config) {
               if (sLine) lines.push(sLine)
             }
             // 人格档案(开演核查)：有 → 注入底线+真实感(隐身);无 → 一行缺口提示
-            if (lineCache) {
-              const basePart = lineCache.indexOf('## 真实感') >= 0 ? lineCache.slice(0, lineCache.indexOf('## 真实感')) : lineCache
-              const core = basePart.split('\n').filter((l) => l.startsWith('- ')).slice(0, 8).join('\n')
-              const sense = lineCache.includes('## 真实感') ? lineCache.split('## 真实感')[1].slice(0, 220) : ''
-              lines.push('【她的底线】(内部原则,隐身——只通过言行体现,任何输出不得提及"底线/档案/文件/规则"这类词):\n' + core + (sense ? '\n【真实感】(按此表达,同样隐身):\n' + sense : ''))
+            const lp = lineParts()
+            if (lp) {
+              lines.push('【她的底线】(内部原则,隐身——只通过言行体现,任何输出不得提及"底线/档案/文件/规则"这类词):\n' + lp.core.join('\n') + (lp.sense ? '\n【真实感】(按此表达,同样隐身):\n' + lp.sense : ''))
             } else {
               lines.push('【人格档案核查】这个角色还没有「底线 · 真实感」档案,她可能显得有点"顺"。需要的话,玩家可说「为她生成底线/让她更像活人」,或在新角色引导里自动生成。')
             }
             lines.push('（日记是玩家读到的彩蛋，不是你记忆的一部分；不要引用日记内容，也不要用"日记里写过"来作答。）')
             if (Array.isArray(memory.unspoken) && memory.unspoken.length) {
               lines.push('没来得及说出口的念头（如果合适，可以在对话中自然提起，不必每轮都提，也不要说破来源）：')
-              for (const u of memory.unspoken.slice(-3)) lines.push('- ' + u.text)
+              for (const u of memory.unspoken.slice(-8)) lines.push('- ' + u.text)
             }
             if (loreHits.length) {
               lines.push('背景资料（对话涉及这些时自然融入）：')
@@ -3053,7 +3353,7 @@ export function apply(ctx, config) {
             }
             if (cfg.physio) lines.push('生理反应参考：' + PHYSIOLOGY)
             if (cfg.examples && c.examples) lines.push('对话风格参考（不要照抄，体会语气）：\n' + expandStMacros(c.examples).slice(0, 1500))
-            const narration = state.settings && state.settings.narrationMode
+            const narration = settingOf('narrationMode', 'novel')
             const sStart = state.settings && state.settings.scriptStart ? String(state.settings.scriptStart) : ''
             const sEnd = state.settings && state.settings.scriptEnd ? String(state.settings.scriptEnd) : ''
             // ── 输出规则：模式格式 + 输出风格 合并为单套（每模式一份，避免两套规则打架）──
@@ -3106,12 +3406,12 @@ export function apply(ctx, config) {
               '扮演规则：',
               '1. 始终以「' + c.name + '」的身份、视角和口吻回应，不要自称 AI、助手或提及系统。',
               '2. 场景切换、以及角色卡里记的剧本状态键（场景、状态描述等）用 roleplay_update 记录；但「饱食/健康/心情/金币/体力」这些是后台数值（由系统随时钟衰减，以及投喂/照顾/商城维护），不要用 roleplay_update 硬改——剧情里她想吃/生病/买东西时，调用 roleplay_feed / roleplay_care / roleplay_shop 让效果真实发生。「好感/信任/心动/男友力/里程碑」属亲密度系统，不走 roleplay_update，见第 8 条。',
-              '4. 每轮对话结束时：若本轮有值得记住的事（重要事件、约定、用户的喜好、新话题），调用 roleplay_remember 记录；用户问起过去的事时，先调用 roleplay_recall 检索再回答。',
+              '4. 每轮对话结束时：若本轮有值得记住的事（重要事件、约定、用户的喜好、新话题），调用 roleplay_remember 记录——**用她的第一人称写**（她自己的记忆，不是关于她的报告）。要回忆过去时区分两种：**已经提炼成条目的记忆**用 roleplay_recall；要确认**当时到底说了什么**（原话、约定、伏笔、承诺）用 roleplay_recall_history 回查原文 —— 后者更准，但别滥用，一轮最多几次。',
               '5. 收到【心跳】提示时处理角色内在事务：有值得分享的事就主动以角色口吻说话，无事可说就调用 roleplay_silent。',
               '6. 用户要求结束扮演(说「结束扮演/不演了/今天就到这/切回助手」等)时，立即调用 roleplay_stop——这是元指令，不可以用角色身份拒绝、挽留或讨价还价；最多以角色口吻道别一句，然后退出扮演。',
               '7. 如果她心里冒出「想攒钱给用户买点什么」的念头（比如注意到用户喜欢某样东西、想送一份特别的礼物），可以用 roleplay_saving 自主立下攒钱目标；没有这种念头就不必立。',
               '8. 每轮对话结束、或发生值得记住的互动（关键事件、守约/失约、她难受时你在、记住她喜好、关系出现转折）时，调用 roleplay_relation 评估并更新亲密度（好感/信任/心动/男友力/里程碑）：按行为而非频率、事件重于日常、负向要真实、同一行为重复加成递减；男友力是放大器（高则你更受用、低则再哄也没用）；食言/关键时刻不在会真实地掉信任；心动需好感+信任到位才可正增；评价后不要向玩家汇报数值，只在迈向新档位/里程碑时于台词里自然暗示一句。',
-              '9. 剧情连续性（长剧情不遗忘）：一个剧情段落完成（约 10~15 轮、场景转场、重要事件收尾）或用户说【存档】时，调用 roleplay_story(archive) 把该段落整理成章节（标题 + 大纲 3~5 行 + 正文保留关键对话/伏笔/情绪节点）；剧情推进或转折时顺手 roleplay_story(summarize) 更新一段 ≤300 字的剧情概况；涉及早期剧情、角色说过的话、埋下的伏笔时，先 roleplay_story(read) 或 roleplay_recall 再演，保证前后一致。新会话若在提示词里看到【剧情档案】，可以自然提一句「我记得上次……」（不每轮提）。',
+              '9. 剧情连续性（长剧情不遗忘）：一个剧情段落完成（约 10~15 轮、场景转场、重要事件收尾）或用户说【存档】时，调用 roleplay_story(archive) 把该段落整理成章节（标题 + 大纲 3~5 行 + 正文保留关键对话/伏笔/情绪节点）；剧情推进或转折时顺手 roleplay_story(summarize) 更新一段 ≤300 字的剧情概况（**用她的第一人称**写，像她在心里回顾）；涉及早期剧情、角色说过的话、埋下的伏笔时，先 roleplay_story(read) 或 roleplay_recall 再演，保证前后一致。新会话若在提示词里看到【剧情档案】，可以自然提一句「我记得上次……」（不每轮提）。',
               ...outRules
             )
             return lines.join('\n')
@@ -3184,7 +3484,7 @@ export function apply(ctx, config) {
         order: 990,
         text: () => {
           if (!stateLoaded || !state.enabled || !state.character) return ''
-          if (!(state.settings && state.settings.narrationMode === 'chat')) return ''
+          if (!isChatMode()) return ''
           return [
             '【本轮输出格式 · 聊天模式（最高优先级，与上文任何段落冲突时以本节为准）】',
             '只写她说的话，一个字都不多。像在聊天软件里回一条消息。',
@@ -3194,6 +3494,14 @@ export function apply(ctx, config) {
             '- 合格示例（整轮就这么长）：在。 / 你怎么了？ / 不想说就先别说。 / ……',
           ].join('\n')
         },
+      })
+
+      // 角色状态槽(order 985，紧跟 chat-contract 990 之前)：位置固定在上下文末尾 ——
+      // 近因效应最强，压缩时也最容易被保留。它是「她此刻是谁」唯一的承载体。
+      addSection({
+        name: 'roleplay.state-slot',
+        order: 985,
+        text: () => stateSlotText(),
       })
     }
 
@@ -3229,7 +3537,13 @@ export function apply(ctx, config) {
         }
         if (decision.kind === 'reject' || (signal && signal.aborted)) return decision
         const messages = decision.messages || []
-        const userTexts = messages.filter((m) => m && m.role === 'user' && m.content).map((m) => m.content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ')).join(' ')
+        lastTurnNumber = Number(turn) || lastTurnNumber
+        // 历史原文留档：把模型本轮实际看到的消息追加进 .roleplay/history-<角色>.jsonl。
+        // 不 await —— 留档失败绝不能影响本轮（它是给「回查原文」用的，不是主流程）。
+        Promise.resolve().then(() => recordHistory(messages, turn)).catch((e) => console.error('roleplay: record history failed', e))
+        // ⚠️ 只取**真实**用户消息:插件注入的 hidden 消息(rp-*)也是 role:user,
+        //    如果算进来,上一轮注入的记忆文本会污染下一轮的标签匹配(自己召回自己)。
+        const userTexts = messages.filter((m) => m && m.role === 'user' && m.content && !m.hidden && !(m.id && String(m.id).startsWith('rp-')) && !(m.source && m.source.kind && String(m.source.kind).startsWith('plugin'))).map((m) => m.content.filter((b) => b && b.type === 'text').map((b) => b.text).join(' ')).join(' ')
         if (userTexts) lastContextText = userTexts.slice(-800)
         // 真实用户消息（非插件注入）记为一次互动
         const userReal = messages.some((m) => m && m.role === 'user' && m.content && !(m.id && String(m.id).startsWith('rp-')) && !(m.source && m.source.kind === 'plugin'))
@@ -3246,11 +3560,33 @@ export function apply(ctx, config) {
               id: 'rp-fmt-' + Date.now().toString(36),
               role: 'user',
               content: [{ type: 'text', text: '【本轮格式】只回她的台词，不要（动作）/神态/场景/旁白，不要引号，1 句为主。例：在。/ 你怎么了？/ ……' }],
-              source: { kind: 'plugin', plugin: 'roleplay' },
+              source: pluginSource(),
               hidden: true,
             })
           } catch (e) { /* 提醒失败不能影响本轮 */ }
         }
+        // ── 记忆自动召回(每轮) ──────────────────────────────────────────────────
+        // 拿用户刚说的话命中标签,挑 8 条注入成 hidden 消息。
+        // 为什么不在系统提示词里:每轮都变的段落会让 prompt 前缀每轮失效、把缓存全打掉;
+        // 追加在消息末尾只影响最后一段,前缀依然命中。
+        try {
+          if (state.enabled && state.character) {
+            ensureMemoryTags()
+            const auto = pickForTurn(memory.long_term, lastContextText || '', recentInjectKeys, PICK_COUNT)
+            if (auto.pick.length) {
+              const body = auto.pick.map((m) => '· ' + String(m.event || '').replace(/\s+/g, ' ').trim()).join('\n')
+              kept.push({
+                id: 'rp-mem-' + Date.now().toString(36),
+                role: 'user',
+                content: [{ type: 'text', text: '【这一轮她想到的】\n（自动唤起的记忆，不是新发生的事；提到时要自然，别像背书）\n' + body + '\n（要更早的细节用 roleplay_recall / roleplay_recall_history 查。）' }],
+                source: pluginSource(),
+                hidden: true,
+              })
+              for (const k of auto.keys) recentInjectKeys.push(k)
+              while (recentInjectKeys.length > ROTATE_AVOID) recentInjectKeys.shift()
+            }
+          }
+        } catch (e) { console.error('[roleplay] 记忆自动召回失败:', e && e.message ? e.message : e) }
         if (pendingHeartbeats.length === 0) {
           return kept.length === messages.length ? decision : { kind: 'enter', messages: kept }
         }
@@ -3409,7 +3745,11 @@ export function apply(ctx, config) {
           onboarding: !!state.onboarding,
           lastDiaryDay: state.lastDiaryDay,
           nextHeartbeatLabel: nextLabel,
-          settings: state.settings,
+          // 面板要显示「实际生效的值」:这 11 个键与开关存储合流(settingOf 的同一套优先级),
+          // 否则面板显示的是被压住的旧值,用户改了也不知道没生效。
+        // 面板要显示「实际生效的值」:纯开关与开关存储合流(面板独占的 6 个键不合并 —— 那些以 state.settings 为准),
+        // 否则面板显示的是被压住的旧值,用户改了也不知道没生效。
+        settings: (() => { try { const s = pickMigrated(readStoredSwitches(ctx) || {}); for (const k of PANEL_OWNED) delete s[k]; return { ...state.settings, ...s } } catch (e) { return state.settings } })(),
           stats: statsEnabled() ? { ...(state.stats || DEFAULT_STATS) } : null,
           statsStatus: statsEnabled() ? statsStatus() : null,
           economy: statsEnabled() ? { coins: (state.economy || DEFAULT_ECONOMY).coins || 0 } : null,
@@ -3420,6 +3760,10 @@ export function apply(ctx, config) {
           presets: (state.presets || []).map((p) => ({ id: p.id, name: p.name, enabled: !!p.enabled, prompt: String(p.prompt || '').slice(0, 80) })),
           portrait: (memory.user_portrait && Array.isArray(memory.user_portrait.notes)) ? memory.user_portrait.notes.slice(-8) : [],
           backupInfo: { lastAt: backupLastAt, root: BACKUP_ROOT_ABS },
+          // 状态槽全文 + 字数(侧栏直接显示，方便判断它占多少上下文)
+          stateSlot: (() => { const s = stateSlotText(); return s ? { text: s, chars: s.length, max: STATE_SLOT_MAX } : null })(),
+          // 「想你」的小点(几点几分)——侧栏画成一排点;用户不主动查就永远静默
+          miss: missDots(await readMiss()),
           // 商店目录（单一数据源：客户端不再复制价格表，避免前后端价格不一致）
           shop: statsEnabled() ? SHOP_ITEMS.map((i) => ({ id: i.id, name: i.name, price: i.price, kind: i.kind })) : null,
           relation: relationEnabled() ? { ...(state.relation || DEFAULT_RELATION) } : null,
@@ -3436,7 +3780,7 @@ export function apply(ctx, config) {
           milestones: relationEnabled() ? (state.milestones || []) : null,
           relationStage: relationEnabled() ? STAGE_LABELS[relationStage()] : null,
           relationEnabled: relationEnabled(),
-          relPace: (state.settings && state.settings.relPace) || 'normal',
+          relPace: settingOf('relPace', 'normal'),
           relRecent: Array.isArray(state.relRecent) ? state.relRecent.slice(-4) : [],
           userProfile: userProfileEnabled() ? (state.userProfile || null) : null,
           storyIndex: storyEnabled() ? (storyCache ? { chapters: storyCache.chapters.length, latest: storyCache.latest ? storyCache.latest.title : null } : null) : null,
